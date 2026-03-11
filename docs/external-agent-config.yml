@@ -1,0 +1,29 @@
+# DuoGuard External Agent Configuration
+#
+# Paste this YAML into GitLab: Automate > Agents > New Agent
+#
+# Triggers:
+#   - Assign reviewer: DuoGuard reviews when assigned as MR reviewer
+#   - Mention: DuoGuard reviews when @mentioned in an MR comment
+#
+# Environment variables provided by GitLab:
+#   $AI_FLOW_CONTEXT    - MR diffs, comments, and surrounding context
+#   $AI_FLOW_INPUT      - The user's message that triggered the agent
+#   $AI_FLOW_EVENT      - Trigger type (mention, assign_reviewer, etc.)
+#   $AI_FLOW_GITLAB_TOKEN       - OAuth token for GitLab API access
+#   $AI_FLOW_PROJECT_PATH       - Full project path (group/project)
+#   $AI_FLOW_GITLAB_HOSTNAME    - GitLab instance hostname
+#   $AI_FLOW_AI_GATEWAY_TOKEN   - Token for AI Gateway (Claude access)
+#   $AI_FLOW_AI_GATEWAY_HEADERS - Headers for AI Gateway requests
+
+injectGatewayToken: true
+image: python:3.12-slim
+commands:
+  - pip install --quiet requests pyyaml urllib3
+  - |
+    python scripts/duoguard.py \
+      --mode agent \
+      --output duoguard-report.md \
+      --sarif duoguard-sarif.json
+variables:
+  - ADDITIONAL_INSTRUCTIONS

@@ -1,93 +1,271 @@
-# duoguard
+# DuoGuard - AI Security Review Flow for GitLab
 
+An open-source, multi-agent security review flow that automatically analyzes merge requests for vulnerabilities using Claude AI on the GitLab Duo Agent Platform.
 
+**Works automatically. Catches real bugs. Suggests actual fixes.**
 
-## Getting started
+## What It Does
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+DuoGuard orchestrates three specialized AI agents to perform comprehensive security review on every merge request:
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+| Agent | Purpose | Platform Tools |
+|-------|---------|----------------|
+| **Code Security Reviewer** | OWASP Top 10 vulnerabilities, injection flaws, auth bypasses | `build_review_merge_request_context`, `list_merge_request_diffs`, `get_repository_file` |
+| **Dependency Auditor** | CVEs, license issues, typosquatting, supply chain risks | `list_merge_request_diffs`, `list_vulnerabilities`, `get_vulnerability_details` |
+| **Secret Scanner** | Hardcoded API keys, tokens, credentials, private keys | `list_merge_request_diffs`, `gitlab_blob_search`, `get_repository_file` |
 
-## Add your files
+Results are posted as:
+- **Summary MR comment** with severity ratings, CWE classifications, and fix suggestions
+- **Inline diff discussions** anchored to the exact lines with findings
+- **MR security labels** (`security::critical`, `security::high`, `security::clean`, etc.)
+- **SARIF reports** for the GitLab Security Dashboard
+- **Code Quality JSON** for the Code Quality widget
+- **Automated MR approval/rejection** based on configurable severity thresholds
+- **Scan metrics** — files scanned, execution time in every report
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Why DuoGuard?
+
+Traditional security scanners use pattern matching. DuoGuard uses Claude's semantic code understanding to:
+
+- **Understand context** - Knows a `password = "test"` in a test file differs from production code
+- **Detect logic flaws** - Catches broken auth flows that regex scanners miss
+- **Suggest real fixes** - Provides working code snippets, not just "fix this"
+- **Reduce false positives** - AI understands intent, not just patterns
+
+## Architecture
+
+DuoGuard supports two execution modes, both powered by the same multi-agent engine:
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/optimus-fulcria/duoguard.git
-git branch -M main
-git push -uf origin main
+┌─────────────────────────────────────────────────────────────────┐
+│                     Trigger Sources                             │
+│                                                                 │
+│  @mention in MR  ──┐    Assign reviewer  ──┐    CI/CD pipeline │
+│                    │                       │         │          │
+│                    v                       v         v          │
+│         ┌──────────────────────────────────────────────┐       │
+│         │        DuoGuard Orchestrator (Python)        │       │
+│         │                                              │       │
+│         │  Mode: agent                  Mode: cicd     │       │
+│         │  Reads: $AI_FLOW_CONTEXT      Reads: GitLab  │       │
+│         │         $AI_FLOW_INPUT        API via CI vars│       │
+│         └────────────────┬─────────────────────────────┘       │
+│                          │                                      │
+│              ┌───────────┼───────────┐                         │
+│              v           v           v                         │
+│     ┌──────────────┐ ┌────────┐ ┌──────────┐                 │
+│     │ Code Security│ │  Dep   │ │  Secret  │  (parallel)     │
+│     │  Reviewer    │ │ Auditor│ │  Scanner │                 │
+│     │  (Claude)    │ │(Claude)│ │ (Claude) │                 │
+│     └──────┬───────┘ └───┬────┘ └────┬─────┘                 │
+│            └──────────────┼──────────┘                         │
+│                           v                                     │
+│              ┌───────────────────┐                              │
+│              │ Report Generator  │                              │
+│              └─────────┬─────────┘                              │
+│                        │                                        │
+│              ┌────┼────┬───────┬──────────┐                     │
+│              v    v    v       v          v                     │
+│          MR Note SARIF Code   Inline    MR Labels              │
+│          +Approve Rpt  Quality Discuss  +Metrics               │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## Integrate with your tools
+## Quick Start
 
-* [Set up project integrations](https://gitlab.com/optimus-fulcria/duoguard/-/settings/integrations)
+### Option 1: External Agent (GitLab Duo Agent Platform)
 
-## Collaborate with your team
+Deploy DuoGuard as a GitLab Duo external agent that responds to triggers:
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+1. Navigate to **Automate > Agents** in your GitLab project
+2. Click **New Agent** and paste the config from [`docs/external-agent-config.yml`](docs/external-agent-config.yml)
+3. Enable triggers: **Assign reviewer** and/or **Mention**
+4. Assign DuoGuard as a reviewer on any MR — it reviews automatically
 
-## Test and Deploy
+The agent uses GitLab's managed AI Gateway credentials (`injectGatewayToken: true`) and reads MR context from `$AI_FLOW_CONTEXT`.
 
-Use the built-in continuous integration in GitLab.
+### Option 2: CI/CD Pipeline
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+Add DuoGuard to your CI/CD pipeline for automatic security review on every MR:
 
-***
+1. Fork this project into your GitLab group
+2. Copy `.gitlab-ci.yml` and the `.gitlab/duo/` folder to your project
+3. Set up CI/CD variables:
+   - `AI_FLOW_AI_GATEWAY_TOKEN` (via AI Gateway) or `ANTHROPIC_API_KEY` (direct)
+4. Create a merge request — DuoGuard runs automatically
 
-# Editing this README
+### Option 3: Duo Flow (Flow Registry v1)
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+DuoGuard includes a Flow Registry v1 flow at `.gitlab/duo/flows/security-review.yml` that orchestrates four components:
 
-## Suggestions for a good README
+1. `code_security_review` — AgentComponent with `build_review_merge_request_context`
+2. `dependency_audit` — AgentComponent with `list_vulnerabilities` tools
+3. `secret_scan` — AgentComponent with `gitlab_blob_search`
+4. `synthesize_report` — OneOffComponent that posts via `create_merge_request_note`
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+### Option 4: Local Development
 
-## Name
-Choose a self-explaining name for your project.
+```bash
+git clone https://gitlab.com/gitlab-ai-hackathon/duoguard.git
+cd duoguard
+pip install requests pyyaml urllib3
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+# Set your API key
+export ANTHROPIC_API_KEY=your_key
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+# CI/CD mode: analyze a specific MR
+python scripts/duoguard.py \
+  --mode cicd \
+  --project-id YOUR_PROJECT_ID \
+  --mr-iid 42 \
+  --output report.md
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+# Agent mode: uses platform environment variables
+export AI_FLOW_PROJECT_PATH=group/project
+export AI_FLOW_CONTEXT='{"merge_request": {"iid": 42}}'
+python scripts/duoguard.py --mode agent
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## Configuration
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Create a `.duoguard.yml` in your project root to customize behavior:
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+```yaml
+# .duoguard.yml
+version: 1
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+# Minimum severity to fail the pipeline
+severity_threshold: HIGH
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+# Enable/disable specific agents
+agents:
+  code_security: true
+  dependency_audit: true
+  secret_scan: true
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+# Exclude files from analysis
+exclude_paths:
+  - vendor/*
+  - node_modules/*
+  - "*.generated.*"
+exclude_extensions:
+  - min.js
+  - map
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+# Post findings as inline diff discussions
+inline_comments: true
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+# Auto-approve MRs below severity threshold
+approve: true
+approve_threshold: HIGH
+
+# Maximum diff size (characters) to send to AI
+max_diff_size: 200000
+```
+
+All settings are optional — DuoGuard works with zero configuration. The config file is auto-detected from `.duoguard.yml`, `.duoguard.yaml`, or `$DUOGUARD_CONFIG`.
+
+## Example Output
+
+```markdown
+## DuoGuard Security Review Report
+
+### Code Security Analysis
+
+### [HIGH] Finding: SQL Injection via string concatenation
+**File:** `app/models/user.rb` (line 45)
+**CWE:** CWE-89 - SQL Injection
+**Description:** User input is concatenated directly into SQL query
+**Attack Scenario:** Attacker sends `'; DROP TABLE users; --` as username
+**Suggested Fix:**
+    User.where("name = ?", params[:name])
+
+### Dependency Audit
+
+| Package | From | To | Risk | Notes |
+|---------|------|----|------|-------|
+| lodash | 4.17.20 | 4.17.21 | LOW | Security patch for CVE-2021-23337 |
+
+### Secret Scan
+
+No hardcoded secrets detected. Changes look clean.
+
+### Summary
+| Category | Findings |
+|----------|----------|
+| Code Security | 1 issue(s) |
+| Dependencies | 0 issue(s) |
+| Secrets | 0 issue(s) |
+
+**Overall Risk Level:** HIGH
+```
+
+## How GitLab Duo Powers DuoGuard
+
+DuoGuard deeply integrates with the GitLab Duo Agent Platform:
+
+| Feature | How DuoGuard Uses It |
+|---------|---------------------|
+| **External Agents** | Responds to @mention and assign_reviewer triggers on MRs |
+| **Flow Registry v1** | 4-component flow: code review → dep audit → secret scan → report |
+| **AI Gateway** | Claude calls via managed credentials (`injectGatewayToken: true`) or Anthropic proxy |
+| **Platform Tools** | `build_review_merge_request_context`, `list_merge_request_diffs`, `list_vulnerabilities`, `gitlab_blob_search`, `create_merge_request_note` |
+| **CI/CD Pipeline** | Automatic security review on `merge_request_event` |
+| **SARIF Reports** | Findings appear in GitLab Security Dashboard |
+| **Code Quality** | Issues surface in GitLab Code Quality widget |
+| **Inline Discussions** | Findings posted as threaded comments on specific diff lines |
+| **Discussion Dedup** | Resolves stale DuoGuard discussions before posting new ones |
+| **MR Labels** | Auto-applies `security::<severity>` labels via Labels API |
+| **MR Approval** | Auto-approve clean MRs, block risky ones via approval API |
+| **AGENTS.md** | Repository-level customization for agent behavior |
+
+## Project Structure
+
+```
+duoguard/
+├── .gitlab/
+│   └── duo/
+│       ├── agents/
+│       │   ├── code-security-reviewer.yml   # OWASP Top 10 analysis agent
+│       │   ├── dependency-auditor.yml        # Supply chain security agent
+│       │   └── secret-scanner.yml            # Credential detection agent
+│       ├── flows/
+│       │   └── security-review.yml           # Flow Registry v1 orchestration
+│       └── agent-config.yml                  # Runtime environment config
+├── scripts/
+│   ├── duoguard.py                           # Multi-mode orchestration engine
+│   └── post_report.py                        # MR comments, inline discussions, approval
+├── docs/
+│   └── external-agent-config.yml             # Config to paste in GitLab UI
+├── tests/                                    # 134 tests
+├── .gitlab-ci.yml                            # CI/CD pipeline
+├── .duoguard.yml                             # Project configuration (optional)
+├── AGENTS.md                                 # Agent customization
+├── DESIGN.md                                 # Architecture decisions
+├── requirements.txt
+├── LICENSE
+└── README.md
+```
+
+## Testing
+
+```bash
+# Run all 134 tests
+python -m pytest tests/ -v
+
+# Tests cover: diff formatting, dependency extraction, severity scoring,
+# report generation, SARIF/CodeQuality output, agent context parsing,
+# AI Gateway calls, Anthropic proxy, MR comment posting, inline discussions,
+# discussion deduplication, MR labels, scan metrics,
+# MR approval/unapproval, config loading, path exclusions, findings export
+```
+
+## Prize Categories
+
+- **Anthropic + GitLab Grand Prize** — Deep Claude integration: semantic security analysis, multi-agent orchestration, AI Gateway managed credentials
+- **Most Technically Impressive** — Flow Registry v1 flow, parallel multi-agent execution, dual-mode (CI/CD + agent trigger), SARIF + Code Quality + inline discussions + MR labels + MR approval + discussion deduplication + scan metrics, 134 tests
+- **Most Impactful** — Security automation that benefits every development team, zero-config with `injectGatewayToken`, configurable via `.duoguard.yml`
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+MIT
