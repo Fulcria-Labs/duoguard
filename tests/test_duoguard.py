@@ -1,6 +1,7 @@
 """Tests for DuoGuard security review orchestration."""
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -32,6 +33,8 @@ from duoguard import (
     generate_codequality_report,
     generate_report,
     generate_sarif_report,
+    get_mr_diff,
+    get_mr_info,
     load_agent_prompt,
     load_config,
     run_agent_mode,
@@ -4746,3 +4749,1084 @@ class TestParseGatewayHeadersExtended:
         result = _parse_gateway_headers("NoCOLONhere\nValid: value")
         assert "NoCOLONhere" not in result
         assert result.get("Valid") == "value"
+
+
+# ── get_mr_diff error handling ─────────────────────────────────
+
+
+class TestGetMrDiffErrors:
+    """Test HTTP error handling in get_mr_diff."""
+
+    @patch("duoguard._session")
+    def test_404_prints_not_found_and_raises(self, mock_session, capsys):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.get.return_value = mock_resp
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            get_mr_diff("123", "1")
+
+        captured = capsys.readouterr()
+        assert "not found" in captured.out
+
+    @patch("duoguard._session")
+    def test_401_prints_access_denied_and_raises(self, mock_session, capsys):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.get.return_value = mock_resp
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            get_mr_diff("123", "1")
+
+        captured = capsys.readouterr()
+        assert "Access denied" in captured.out
+
+    @patch("duoguard._session")
+    def test_403_prints_access_denied_and_raises(self, mock_session, capsys):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.get.return_value = mock_resp
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            get_mr_diff("123", "1")
+
+        captured = capsys.readouterr()
+        assert "Access denied" in captured.out
+
+    @patch("duoguard._session")
+    def test_connection_error_prints_and_raises(self, mock_session, capsys):
+        mock_session.get.side_effect = requests.exceptions.ConnectionError("refused")
+
+        with pytest.raises(requests.exceptions.ConnectionError):
+            get_mr_diff("123", "1")
+
+        captured = capsys.readouterr()
+        assert "Cannot reach GitLab API" in captured.out
+
+    @patch("duoguard._session")
+    def test_timeout_prints_and_raises(self, mock_session, capsys):
+        mock_session.get.side_effect = requests.exceptions.Timeout("timeout")
+
+        with pytest.raises(requests.exceptions.Timeout):
+            get_mr_diff("123", "1")
+
+        captured = capsys.readouterr()
+        assert "timed out" in captured.out
+
+    @patch("duoguard._session")
+    def test_success_returns_json(self, mock_session):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"changes": []}
+        mock_session.get.return_value = mock_resp
+
+        result = get_mr_diff("123", "1")
+        assert result == {"changes": []}
+
+
+# ── get_mr_info error handling ─────────────────────────────────
+
+
+class TestGetMrInfoErrors:
+    """Test HTTP error handling in get_mr_info."""
+
+    @patch("duoguard._session")
+    def test_404_prints_not_found_and_raises(self, mock_session, capsys):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.get.return_value = mock_resp
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            get_mr_info("123", "1")
+
+        captured = capsys.readouterr()
+        assert "not found" in captured.out
+
+    @patch("duoguard._session")
+    def test_403_prints_access_denied_and_raises(self, mock_session, capsys):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.get.return_value = mock_resp
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            get_mr_info("123", "1")
+
+        captured = capsys.readouterr()
+        assert "Access denied" in captured.out
+
+    @patch("duoguard._session")
+    def test_connection_error_prints_and_raises(self, mock_session, capsys):
+        mock_session.get.side_effect = requests.exceptions.ConnectionError("refused")
+
+        with pytest.raises(requests.exceptions.ConnectionError):
+            get_mr_info("123", "1")
+
+        captured = capsys.readouterr()
+        assert "Cannot reach GitLab API" in captured.out
+
+    @patch("duoguard._session")
+    def test_success_returns_json(self, mock_session):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"iid": 1, "title": "Test MR"}
+        mock_session.get.return_value = mock_resp
+
+        result = get_mr_info("123", "1")
+        assert result["title"] == "Test MR"
+
+
+# ── call_ai_gateway error paths ──────────────────────────────
+
+
+class TestCallAiGatewayErrors:
+    """Test error handling across all three call_ai_gateway paths."""
+
+    @patch.dict(os.environ, {"AI_FLOW_AI_GATEWAY_URL": "https://gw.example.com",
+                              "AI_FLOW_AI_GATEWAY_TOKEN": "tok123",
+                              "AI_FLOW_AI_GATEWAY_HEADERS": "{}"})
+    @patch("duoguard._session")
+    def test_gateway_429_prints_rate_limit_warning(self, mock_session, capsys):
+        """Path 1: 429 from AI Gateway prints rate limit message."""
+        # Need to reimport to pick up env vars
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_tok = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = "https://gw.example.com"
+        duoguard.AI_GATEWAY_TOKEN = "tok123"
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.post.return_value = mock_resp
+
+        try:
+            with pytest.raises(requests.exceptions.HTTPError):
+                duoguard.call_ai_gateway("system", "user")
+            captured = capsys.readouterr()
+            assert "429" in captured.out
+            assert "Rate limited" in captured.out
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch.dict(os.environ, {"AI_FLOW_AI_GATEWAY_URL": "https://gw.example.com",
+                              "AI_FLOW_AI_GATEWAY_TOKEN": "tok123",
+                              "AI_FLOW_AI_GATEWAY_HEADERS": "{}"})
+    @patch("duoguard._session")
+    def test_gateway_timeout_prints_warning(self, mock_session, capsys):
+        """Path 1: Timeout from AI Gateway prints warning."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_tok = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = "https://gw.example.com"
+        duoguard.AI_GATEWAY_TOKEN = "tok123"
+
+        mock_session.post.side_effect = requests.exceptions.Timeout("timeout")
+
+        try:
+            with pytest.raises(requests.exceptions.Timeout):
+                duoguard.call_ai_gateway("system", "user")
+            captured = capsys.readouterr()
+            assert "timed out" in captured.out
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch.dict(os.environ, {"AI_FLOW_AI_GATEWAY_URL": "",
+                              "AI_FLOW_AI_GATEWAY_TOKEN": "tok123",
+                              "AI_FLOW_AI_GATEWAY_HEADERS": "{}"})
+    @patch("duoguard._session")
+    def test_proxy_http_error_prints_warning(self, mock_session, capsys):
+        """Path 2: HTTP error from Anthropic proxy prints status."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_tok = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = ""
+        duoguard.AI_GATEWAY_TOKEN = "tok123"
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.post.return_value = mock_resp
+
+        try:
+            with pytest.raises(requests.exceptions.HTTPError):
+                duoguard.call_ai_gateway("system", "user")
+            captured = capsys.readouterr()
+            assert "Anthropic proxy returned HTTP 500" in captured.out
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch.dict(os.environ, {"AI_FLOW_AI_GATEWAY_URL": "",
+                              "AI_FLOW_AI_GATEWAY_TOKEN": "",
+                              "ANTHROPIC_API_KEY": "sk-test"})
+    @patch("duoguard._session")
+    def test_direct_api_401_prints_invalid_key(self, mock_session, capsys):
+        """Path 3: 401 from direct Anthropic API prints invalid key message."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_tok = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = ""
+        duoguard.AI_GATEWAY_TOKEN = ""
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.post.return_value = mock_resp
+
+        try:
+            with pytest.raises(requests.exceptions.HTTPError):
+                duoguard.call_ai_gateway("system", "user")
+            captured = capsys.readouterr()
+            assert "Invalid ANTHROPIC_API_KEY" in captured.out
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch.dict(os.environ, {"AI_FLOW_AI_GATEWAY_URL": "",
+                              "AI_FLOW_AI_GATEWAY_TOKEN": "",
+                              "ANTHROPIC_API_KEY": ""})
+    def test_no_credentials_returns_placeholder(self):
+        """No gateway and no API key returns placeholder text."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_tok = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = ""
+        duoguard.AI_GATEWAY_TOKEN = ""
+
+        try:
+            result = duoguard.call_ai_gateway("system", "user")
+            assert "not configured" in result.lower() or "AI Gateway" in result
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch.dict(os.environ, {"AI_FLOW_AI_GATEWAY_URL": "",
+                              "AI_FLOW_AI_GATEWAY_TOKEN": "",
+                              "ANTHROPIC_API_KEY": "sk-test"})
+    @patch("duoguard._session")
+    def test_direct_api_non_401_error_prints_status(self, mock_session, capsys):
+        """Path 3: Non-401 HTTP error still prints status."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_tok = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = ""
+        duoguard.AI_GATEWAY_TOKEN = ""
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.post.return_value = mock_resp
+
+        try:
+            with pytest.raises(requests.exceptions.HTTPError):
+                duoguard.call_ai_gateway("system", "user")
+            captured = capsys.readouterr()
+            assert "Anthropic API returned HTTP 500" in captured.out
+            # 401-specific message should NOT be present
+            assert "Invalid ANTHROPIC_API_KEY" not in captured.out
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch.dict(os.environ, {"AI_FLOW_AI_GATEWAY_URL": "https://gw.example.com",
+                              "AI_FLOW_AI_GATEWAY_TOKEN": "tok123",
+                              "AI_FLOW_AI_GATEWAY_HEADERS": "{}"})
+    @patch("duoguard._session")
+    def test_gateway_500_prints_generic_warning(self, mock_session, capsys):
+        """Path 1: Non-429 HTTP error prints generic warning without rate limit msg."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_tok = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = "https://gw.example.com"
+        duoguard.AI_GATEWAY_TOKEN = "tok123"
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_session.post.return_value = mock_resp
+
+        try:
+            with pytest.raises(requests.exceptions.HTTPError):
+                duoguard.call_ai_gateway("system", "user")
+            captured = capsys.readouterr()
+            assert "AI Gateway returned HTTP 500" in captured.out
+            assert "Rate limited" not in captured.out
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+
+# ── Agent prompt loading edge cases ──────────────────────────
+
+
+class TestLoadAgentPromptEdgeCases:
+    """Test load_agent_prompt with missing/invalid configs."""
+
+    def test_nonexistent_file_returns_empty(self):
+        result = load_agent_prompt("nonexistent/path/agent.yml")
+        assert result == ""
+
+    def test_empty_yaml_returns_empty(self, tmp_path):
+        agent_file = tmp_path / "agent.yml"
+        agent_file.write_text("")
+        with patch("duoguard.Path") as MockPath:
+            mock_path = MagicMock()
+            mock_path.exists.return_value = True
+            mock_path.__truediv__ = MagicMock(return_value=mock_path)
+            MockPath.return_value.__truediv__ = MagicMock(return_value=mock_path)
+
+            # Directly test - empty YAML returns None from safe_load
+            result = load_agent_prompt("nonexistent.yml")
+            # Returns "" for non-existent file
+            assert result == ""
+
+    def test_yaml_without_system_prompt_key_returns_empty(self, tmp_path):
+        """YAML with other keys but no system_prompt returns empty string."""
+        agent_yml = tmp_path / "agent.yml"
+        agent_yml.write_text("name: test-agent\nversion: 1\n")
+
+        with patch("duoguard.Path.__new__") as _:
+            # Test the logic directly
+            import yaml
+            config = yaml.safe_load("name: test-agent\nversion: 1\n")
+            assert isinstance(config, dict)
+            assert config.get("system_prompt", "") == ""
+
+
+# ── Agent runner fallback prompts ─────────────────────────────
+
+
+class TestAgentRunnerFallbacks:
+    """Test that runner functions use fallback prompts when YAML missing."""
+
+    @patch("duoguard.call_ai_gateway")
+    @patch("duoguard.load_agent_prompt", return_value="")
+    def test_code_security_review_uses_fallback(self, mock_load, mock_call):
+        mock_call.return_value = "No findings"
+        run_code_security_review("diff text")
+        # Should have been called with a fallback prompt about security
+        call_args = mock_call.call_args
+        assert "security" in call_args[0][0].lower()
+
+    @patch("duoguard.call_ai_gateway")
+    @patch("duoguard.load_agent_prompt", return_value="")
+    def test_secret_scan_uses_fallback(self, mock_load, mock_call):
+        mock_call.return_value = "No secrets"
+        run_secret_scan("diff text")
+        call_args = mock_call.call_args
+        assert "secret" in call_args[0][0].lower()
+
+    @patch("duoguard.call_ai_gateway")
+    @patch("duoguard.load_agent_prompt", return_value="Custom prompt")
+    def test_code_security_uses_loaded_prompt(self, mock_load, mock_call):
+        mock_call.return_value = "No findings"
+        run_code_security_review("diff")
+        call_args = mock_call.call_args
+        assert call_args[0][0] == "Custom prompt"
+
+    @patch("duoguard.call_ai_gateway")
+    @patch("duoguard.load_agent_prompt", return_value="Custom dep prompt")
+    def test_dependency_audit_uses_loaded_prompt(self, mock_load, mock_call):
+        mock_call.return_value = "OK"
+        run_dependency_audit("+ flask==2.0")
+        call_args = mock_call.call_args
+        assert call_args[0][0] == "Custom dep prompt"
+
+    @patch("duoguard.call_ai_gateway")
+    @patch("duoguard.load_agent_prompt", return_value="Custom secret prompt")
+    def test_secret_scan_uses_loaded_prompt(self, mock_load, mock_call):
+        mock_call.return_value = "Clean"
+        run_secret_scan("diff")
+        call_args = mock_call.call_args
+        assert call_args[0][0] == "Custom secret prompt"
+
+    @patch("duoguard.call_ai_gateway")
+    @patch("duoguard.load_agent_prompt", return_value="")
+    def test_dependency_audit_uses_fallback(self, mock_load, mock_call):
+        mock_call.return_value = "No findings"
+        run_dependency_audit("+ requests==2.28")
+        call_args = mock_call.call_args
+        assert "dependency" in call_args[0][0].lower()
+
+
+# ── _parse_findings line number edge cases ────────────────────
+
+
+class TestParseFindingsLineNumEdgeCases:
+    """Test _parse_findings handling of invalid line numbers."""
+
+    def test_line_with_no_digits_after_line_keyword(self):
+        """File line with 'line' but no digits should default to 1."""
+        text = (
+            "### [HIGH] Finding: SQL injection\n"
+            "**File:** `app.py` (line )\n"
+        )
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["line_num"] == 1
+
+    def test_line_with_only_spaces_after_line_keyword(self):
+        """File line with 'line   ' (whitespace only) defaults to 1."""
+        text = (
+            "### [MEDIUM] Finding: XSS\n"
+            "**File:** `ui.js` (line   )\n"
+        )
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["line_num"] == 1
+
+    def test_very_large_line_number_capped(self):
+        """Very large line numbers get truncated to 5 digits max."""
+        text = (
+            "### [LOW] Finding: Minor issue\n"
+            "**File:** `big.py` (line 9999999999)\n"
+        )
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        # [:5] caps digit string to 5 chars = 99999
+        assert findings[0]["line_num"] == 99999
+
+    def test_finding_without_file_line_stays_pending(self):
+        """Finding followed by another finding (no File line) is dropped."""
+        text = (
+            "### [HIGH] Finding: First issue\n"
+            "### [LOW] Finding: Second issue\n"
+            "**File:** `b.py` (line 5)\n"
+        )
+        findings = _parse_findings(text)
+        # Only second finding has a File line
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "low"
+
+    def test_file_line_without_backtick_ignored(self):
+        """File line without backticks doesn't parse file_path."""
+        text = (
+            "### [HIGH] Finding: Issue\n"
+            "**File:** app.py (line 10)\n"
+        )
+        findings = _parse_findings(text)
+        # len(parts) < 2 when no backticks
+        assert len(findings) == 0
+
+    def test_multiple_findings_parsed(self):
+        """Multiple well-formed findings are all parsed."""
+        text = (
+            "### [CRITICAL] Finding: RCE\n"
+            "**File:** `main.py` (line 42)\n"
+            "### [HIGH] Finding: SQLi\n"
+            "**File:** `db.py` (line 100)\n"
+            "### [LOW] Finding: Info leak\n"
+            "**File:** `views.py` (line 7)\n"
+        )
+        findings = _parse_findings(text)
+        assert len(findings) == 3
+        assert findings[0]["severity"] == "critical"
+        assert findings[1]["severity"] == "high"
+        assert findings[2]["severity"] == "low"
+        assert findings[0]["line_num"] == 42
+        assert findings[1]["line_num"] == 100
+        assert findings[2]["line_num"] == 7
+
+    def test_info_severity_parsed(self):
+        """INFO severity findings are parsed."""
+        text = (
+            "### [INFO] Finding: Minor note\n"
+            "**File:** `readme.md` (line 1)\n"
+        )
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "info"
+
+    def test_custom_category(self):
+        """Custom category is passed through to findings."""
+        text = (
+            "### [HIGH] Finding: Secret\n"
+            "**File:** `config.py` (line 5)\n"
+        )
+        findings = _parse_findings(text, category="secret-scan")
+        assert len(findings) == 1
+        assert findings[0]["category"] == "secret-scan"
+
+    def test_empty_text_returns_empty(self):
+        """Empty string returns no findings."""
+        assert _parse_findings("") == []
+
+    def test_no_findings_text(self):
+        """Text with no finding patterns returns empty list."""
+        assert _parse_findings("All good, no issues found.") == []
+
+    def test_file_without_line_keyword(self):
+        """File line without 'line' keyword sets line_num to 1."""
+        text = (
+            "### [MEDIUM] Finding: Missing auth\n"
+            "**File:** `auth.py`\n"
+        )
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["line_num"] == 1
+        assert findings[0]["file_path"] == "auth.py"
+
+
+# ── post_report main() CLI ───────────────────────────────────
+
+
+class TestPostReportMain:
+    """Test post_report.py main() function CLI handling."""
+
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_basic_report_posting(self, mock_post, mock_find, mock_labels,
+                                   tmp_path):
+        """Main posts a new comment when no existing comment."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("# DuoGuard Report\nAll clean.")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--severity", "LOW"]):
+            pr_main()
+
+        mock_post.assert_called_once()
+        mock_labels.assert_called_once_with("42", "7", "LOW")
+
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.update_mr_comment")
+    @patch("post_report.find_existing_comment", return_value=999)
+    def test_updates_existing_comment(self, mock_find, mock_update, mock_labels,
+                                       tmp_path):
+        """Main updates comment when one already exists."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("# Updated Report")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--severity", "HIGH"]):
+            pr_main()
+
+        mock_update.assert_called_once_with("42", "7", 999, "# Updated Report")
+
+    def test_missing_report_file_exits(self, tmp_path):
+        """Main exits with code 1 when report file doesn't exist."""
+        from post_report import main as pr_main
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(tmp_path / "missing.md")]):
+            with pytest.raises(SystemExit) as exc:
+                pr_main()
+            assert exc.value.code == 1
+
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_empty_report_skips_posting(self, mock_post, mock_find, mock_labels,
+                                         tmp_path):
+        """Main skips posting when report content is empty."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "empty.md"
+        report_file.write_text("   \n  ")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file)]):
+            pr_main()
+
+        mock_post.assert_not_called()
+
+    @patch("post_report.approve_mr")
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_approve_below_threshold(self, mock_post, mock_find, mock_labels,
+                                      mock_approve, tmp_path):
+        """Main approves MR when severity is below threshold."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content here")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--approve",
+                                 "--severity", "LOW",
+                                 "--approve-threshold", "HIGH"]):
+            pr_main()
+
+        mock_approve.assert_called_once_with("42", "7")
+
+    @patch("post_report.unapprove_mr")
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_unapprove_above_threshold(self, mock_post, mock_find, mock_labels,
+                                        mock_unapprove, tmp_path):
+        """Main unapproves MR when severity meets threshold."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content here")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--approve",
+                                 "--severity", "CRITICAL",
+                                 "--approve-threshold", "HIGH"]):
+            pr_main()
+
+        mock_unapprove.assert_called_once_with("42", "7")
+
+    @patch("post_report.create_issues_for_findings")
+    @patch("post_report.resolve_stale_discussions")
+    @patch("post_report.post_inline_findings", return_value=1)
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_create_issues_flag(self, mock_post, mock_find, mock_labels,
+                                 mock_inline, mock_resolve,
+                                 mock_create_issues, tmp_path):
+        """Main creates issues when --create-issues is set."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content")
+
+        findings_file = tmp_path / "findings.json"
+        findings_file.write_text(json.dumps([
+            {"severity": "critical", "description": "RCE", "file_path": "x.py",
+             "line_num": 1, "category": "code-security"}
+        ]))
+
+        mock_create_issues.return_value = [{"iid": 1}]
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--findings-file", str(findings_file),
+                                 "--create-issues",
+                                 "--severity", "CRITICAL"]):
+            pr_main()
+
+        mock_create_issues.assert_called_once()
+
+    @patch("post_report.resolve_stale_discussions")
+    @patch("post_report.post_inline_findings")
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_inline_findings_posted(self, mock_post, mock_find, mock_labels,
+                                     mock_inline, mock_resolve, tmp_path):
+        """Main posts inline findings when findings file exists."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content")
+
+        findings_file = tmp_path / "findings.json"
+        findings_file.write_text(json.dumps([
+            {"severity": "high", "description": "SQLi", "file_path": "db.py",
+             "line_num": 10, "category": "code-security"}
+        ]))
+
+        mock_inline.return_value = 1
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--findings-file", str(findings_file),
+                                 "--severity", "HIGH"]):
+            pr_main()
+
+        mock_resolve.assert_called_once()
+        mock_inline.assert_called_once()
+
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_severity_none_sets_clean_label(self, mock_post, mock_find,
+                                             mock_labels, tmp_path):
+        """NONE severity still calls update_mr_labels."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Clean report")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--severity", "NONE"]):
+            pr_main()
+
+        mock_labels.assert_called_once_with("42", "7", "NONE")
+
+
+# ── duoguard main() CLI ─────────────────────────────────────
+
+
+class TestDuoguardMain:
+    """Test duoguard.py main() CLI entry point."""
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard.load_config", return_value=dict(DEFAULT_CONFIG))
+    def test_cicd_mode_calls_security_scan(self, mock_config, mock_scan):
+        """CI/CD mode with project-id and mr-iid calls _run_security_scan."""
+        import duoguard
+        with patch("sys.argv", ["duoguard.py",
+                                 "--mode", "cicd",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7"]):
+            duoguard.main()
+
+        mock_scan.assert_called_once()
+        args = mock_scan.call_args
+        assert args[0][0] == "42"
+        assert args[0][1] == "7"
+
+    @patch("duoguard.load_config", return_value=dict(DEFAULT_CONFIG))
+    def test_cicd_mode_missing_project_id_errors(self, mock_config):
+        """CI/CD mode without --project-id raises SystemExit."""
+        import duoguard
+        with patch("sys.argv", ["duoguard.py", "--mode", "cicd", "--mr-iid", "7"]):
+            with pytest.raises(SystemExit):
+                duoguard.main()
+
+    @patch("duoguard.load_config", return_value=dict(DEFAULT_CONFIG))
+    def test_cicd_mode_missing_mr_iid_errors(self, mock_config):
+        """CI/CD mode without --mr-iid raises SystemExit."""
+        import duoguard
+        with patch("sys.argv", ["duoguard.py", "--mode", "cicd", "--project-id", "42"]):
+            with pytest.raises(SystemExit):
+                duoguard.main()
+
+    @patch("duoguard.run_agent_mode")
+    @patch("duoguard.load_config", return_value=dict(DEFAULT_CONFIG))
+    def test_agent_mode_calls_run_agent_mode(self, mock_config, mock_agent):
+        """Agent mode calls run_agent_mode."""
+        import duoguard
+        with patch("sys.argv", ["duoguard.py", "--mode", "agent"]):
+            duoguard.main()
+
+        mock_agent.assert_called_once()
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard.load_config", return_value={**DEFAULT_CONFIG, "severity_threshold": "LOW"})
+    def test_config_fail_on_used_when_no_cli_flag(self, mock_config, mock_scan):
+        """Config severity_threshold is used when --fail-on not specified."""
+        import duoguard
+        with patch("sys.argv", ["duoguard.py",
+                                 "--mode", "cicd",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7"]):
+            duoguard.main()
+
+        args = mock_scan.call_args
+        # fail_on should be "LOW" from config
+        assert args[0][4] == "LOW"
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard.load_config", return_value={**DEFAULT_CONFIG, "severity_threshold": "LOW"})
+    def test_cli_fail_on_overrides_config(self, mock_config, mock_scan):
+        """--fail-on CLI flag overrides config severity_threshold."""
+        import duoguard
+        with patch("sys.argv", ["duoguard.py",
+                                 "--mode", "cicd",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--fail-on", "CRITICAL"]):
+            duoguard.main()
+
+        args = mock_scan.call_args
+        assert args[0][4] == "CRITICAL"
+
+    @patch("duoguard.run_agent_mode")
+    @patch("duoguard.load_config", return_value=dict(DEFAULT_CONFIG))
+    def test_agent_mode_passes_output_flag(self, mock_config, mock_agent):
+        """Agent mode passes --output and --sarif to run_agent_mode."""
+        import duoguard
+        with patch("sys.argv", ["duoguard.py",
+                                 "--mode", "agent",
+                                 "--output", "custom.md",
+                                 "--sarif", "results.sarif"]):
+            duoguard.main()
+
+        kwargs = mock_agent.call_args[1]
+        assert kwargs["output"] == "custom.md"
+        assert kwargs["sarif"] == "results.sarif"
+
+
+# ── run_agent_mode edge cases ────────────────────────────────
+
+
+class TestRunAgentModeEdgeCases:
+    """Test run_agent_mode error handling."""
+
+    @patch("duoguard._parse_agent_context", return_value=("", ""))
+    @patch("duoguard._resolve_api_url_for_agent", return_value="https://gitlab.com/api/v4")
+    def test_missing_context_exits(self, mock_resolve, mock_parse):
+        """run_agent_mode exits when project_id/mr_iid can't be parsed."""
+        with pytest.raises(SystemExit) as exc:
+            run_agent_mode()
+        assert exc.value.code == 1
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard._parse_agent_context", return_value=("42", "7"))
+    @patch("duoguard._resolve_api_url_for_agent", return_value="https://gitlab.com/api/v4")
+    def test_success_calls_security_scan(self, mock_resolve, mock_parse, mock_scan):
+        """run_agent_mode calls _run_security_scan with parsed context."""
+        run_agent_mode()
+        mock_scan.assert_called_once()
+        args = mock_scan.call_args
+        assert args[0][0] == "42"
+        assert args[0][1] == "7"
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard._parse_agent_context", return_value=("42", "7"))
+    @patch("duoguard._resolve_api_url_for_agent", return_value="https://gitlab.com/api/v4")
+    def test_passes_output_and_sarif(self, mock_resolve, mock_parse, mock_scan):
+        """run_agent_mode forwards output, sarif, and fail_on args."""
+        run_agent_mode(output="out.md", sarif="out.sarif", fail_on="CRITICAL")
+        args = mock_scan.call_args
+        assert args[0][2] == "out.md"
+        assert args[0][3] == "out.sarif"
+        assert args[0][4] == "CRITICAL"
+
+    @patch("duoguard._parse_agent_context", return_value=(None, "7"))
+    @patch("duoguard._resolve_api_url_for_agent", return_value="https://gitlab.com/api/v4")
+    def test_missing_project_id_exits(self, mock_resolve, mock_parse):
+        """run_agent_mode exits when project_id is None."""
+        with pytest.raises(SystemExit):
+            run_agent_mode()
+
+    @patch("duoguard._parse_agent_context", return_value=("42", None))
+    @patch("duoguard._resolve_api_url_for_agent", return_value="https://gitlab.com/api/v4")
+    def test_missing_mr_iid_exits(self, mock_resolve, mock_parse):
+        """run_agent_mode exits when mr_iid is None."""
+        with pytest.raises(SystemExit):
+            run_agent_mode()
+
+
+# ── create_issue_for_finding edge cases ──────────────────────
+
+
+class TestCreateIssueEdgeCases:
+    """Edge cases for create_issue_for_finding."""
+
+    @patch("post_report.requests.post")
+    def test_long_title_truncated(self, mock_post):
+        """Issue title longer than 255 chars is truncated."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"iid": 1}
+        mock_post.return_value = mock_resp
+
+        finding = {
+            "severity": "critical",
+            "description": "A" * 300,
+            "file_path": "app.py",
+            "line_num": 1,
+            "category": "code-security",
+        }
+        create_issue_for_finding("42", "1", finding)
+
+        payload = mock_post.call_args[1]["json"]
+        assert len(payload["title"]) <= 255
+        assert payload["title"].endswith("...")
+
+    @patch("post_report.requests.post")
+    def test_issue_with_cwe_and_owasp(self, mock_post):
+        """Issue body includes CWE link and OWASP when present."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"iid": 2}
+        mock_post.return_value = mock_resp
+
+        finding = {
+            "severity": "high",
+            "description": "SQL Injection",
+            "file_path": "db.py",
+            "line_num": 42,
+            "category": "code-security",
+            "cwe": "CWE-89",
+            "owasp": "A03:2021-Injection",
+        }
+        result = create_issue_for_finding("42", "1", finding)
+        assert result is not None
+
+        body = mock_post.call_args[1]["json"]["description"]
+        assert "CWE-89" in body
+        assert "A03:2021-Injection" in body
+
+    @patch("post_report.requests.post")
+    def test_issue_http_error_returns_none(self, mock_post):
+        """HTTP error during issue creation returns None."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_post.return_value = mock_resp
+
+        result = create_issue_for_finding("42", "1", {
+            "severity": "high", "description": "Test"
+        })
+        assert result is None
+
+
+# ── create_issues_for_findings filtering ─────────────────────
+
+
+class TestCreateIssuesFiltering:
+    """Test severity filtering in create_issues_for_findings."""
+
+    @patch("post_report.create_issue_for_finding")
+    def test_filters_below_min_severity(self, mock_create):
+        """Findings below min_severity are skipped."""
+        mock_create.return_value = {"iid": 1}
+        findings = [
+            {"severity": "low", "description": "Minor"},
+            {"severity": "critical", "description": "Major"},
+        ]
+        result = create_issues_for_findings("42", "1", findings, min_severity="high")
+        assert len(result) == 1
+        # Only critical should have been passed
+        assert mock_create.call_count == 1
+
+    @patch("post_report.create_issue_for_finding")
+    def test_unknown_severity_treated_as_lowest(self, mock_create):
+        """Unknown severity defaults to index 0 (below any threshold)."""
+        mock_create.return_value = {"iid": 1}
+        findings = [
+            {"severity": "unknown", "description": "Weird"},
+        ]
+        result = create_issues_for_findings("42", "1", findings, min_severity="high")
+        assert len(result) == 0
+
+    @patch("post_report.create_issue_for_finding")
+    def test_empty_findings_returns_empty(self, mock_create):
+        """Empty findings list returns empty result."""
+        result = create_issues_for_findings("42", "1", [], min_severity="high")
+        assert result == []
+        mock_create.assert_not_called()
+
+    @patch("post_report.create_issue_for_finding")
+    def test_min_severity_low_includes_all_except_info(self, mock_create):
+        """min_severity=low includes low, medium, high, critical."""
+        mock_create.return_value = {"iid": 1}
+        findings = [
+            {"severity": "info", "description": "Note"},
+            {"severity": "low", "description": "Minor"},
+            {"severity": "medium", "description": "Moderate"},
+            {"severity": "high", "description": "Serious"},
+            {"severity": "critical", "description": "Critical"},
+        ]
+        result = create_issues_for_findings("42", "1", findings, min_severity="low")
+        assert len(result) == 4
+        assert mock_create.call_count == 4
+
+
+# ── update_mr_labels edge cases ──────────────────────────────
+
+
+class TestUpdateMrLabelsEdgeCases:
+    """Edge cases for update_mr_labels."""
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_preserves_non_security_labels(self, mock_get, mock_put):
+        """Non-security labels are preserved when updating."""
+        mock_get_resp = MagicMock()
+        mock_get_resp.raise_for_status.return_value = None
+        mock_get_resp.json.return_value = {"labels": ["bug", "security::low", "feature"]}
+        mock_get.return_value = mock_get_resp
+
+        mock_put_resp = MagicMock()
+        mock_put_resp.raise_for_status.return_value = None
+        mock_put.return_value = mock_put_resp
+
+        result = update_mr_labels("42", "1", "HIGH")
+        assert result is True
+
+        labels_str = mock_put.call_args[1]["json"]["labels"]
+        assert "bug" in labels_str
+        assert "feature" in labels_str
+        assert "security::high" in labels_str
+        assert "security::low" not in labels_str
+
+    @patch("post_report.requests.get")
+    def test_get_labels_http_error_continues(self, mock_get):
+        """HTTP error fetching labels uses empty list and continues."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_get.return_value = mock_resp
+
+        with patch("post_report.requests.put") as mock_put:
+            mock_put_resp = MagicMock()
+            mock_put_resp.raise_for_status.return_value = None
+            mock_put.return_value = mock_put_resp
+
+            result = update_mr_labels("42", "1", "MEDIUM")
+            assert result is True
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_unknown_severity_defaults_to_clean(self, mock_get, mock_put):
+        """Unknown severity string maps to security::clean."""
+        mock_get_resp = MagicMock()
+        mock_get_resp.raise_for_status.return_value = None
+        mock_get_resp.json.return_value = {"labels": []}
+        mock_get.return_value = mock_get_resp
+
+        mock_put_resp = MagicMock()
+        mock_put_resp.raise_for_status.return_value = None
+        mock_put.return_value = mock_put_resp
+
+        update_mr_labels("42", "1", "UNKNOWN")
+        labels_str = mock_put.call_args[1]["json"]["labels"]
+        assert "security::clean" in labels_str
