@@ -1,0 +1,13 @@
+# DuoGuard runtime environment configuration for GitLab Duo Agent Platform
+image: python:3.12-slim
+
+setup_script:
+  - pip install --quiet requests pyyaml urllib3
+
+cache:
+  key:
+    files:
+      - requirements.txt
+    prefix: duoguard
+  paths:
+    - .cache/pip/

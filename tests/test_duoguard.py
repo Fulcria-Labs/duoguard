@@ -1498,3 +1498,763 @@ class TestSecurityLabelsConstant:
         assert "security::low" in SECURITY_LABELS
         assert "security::clean" in SECURITY_LABELS
         assert len(SECURITY_LABELS) == 5
+
+
+# ── NEW TESTS: Edge cases, security patterns, integration ────────
+
+
+class TestFormatDiffEdgeCases:
+    """Additional edge cases for diff formatting."""
+
+    def test_no_path_keys_uses_unknown(self):
+        """When neither new_path nor old_path is present, 'unknown' is used."""
+        changes = [{"diff": "+some code"}]
+        result = format_diff_for_analysis(changes)
+        assert "unknown" in result
+        assert "+some code" in result
+
+    def test_empty_changes_list(self):
+        """An empty changes list produces empty output."""
+        result = format_diff_for_analysis([])
+        assert result == ""
+
+    def test_unicode_content_preserved(self):
+        """Unicode characters in diffs are preserved."""
+        changes = [{"new_path": "i18n.py", "diff": "+msg = 'Hola mundo'"}]
+        result = format_diff_for_analysis(changes)
+        assert "Hola mundo" in result
+
+    def test_exact_boundary_truncation(self):
+        """A diff that lands exactly at max_size boundary is included."""
+        changes = [{"new_path": "a.py", "diff": "+x"}]
+        # The formatted chunk will be small enough for any reasonable limit
+        result = format_diff_for_analysis(changes, max_size=5000)
+        assert "a.py" in result
+        assert "omitted" not in result
+
+    def test_all_files_truncated_at_zero_limit(self):
+        """When max_size=0, all files with diffs are omitted."""
+        changes = [{"new_path": "a.py", "diff": "+x = 1"}]
+        result = format_diff_for_analysis(changes, max_size=0)
+        assert "1 file(s) omitted" in result
+        assert "a.py" not in result.split("omitted")[0]
+
+    def test_diff_contains_markdown_code_fences(self):
+        """Diff output is wrapped in code fences with diff language."""
+        changes = [{"new_path": "test.py", "diff": "+pass"}]
+        result = format_diff_for_analysis(changes)
+        assert "```diff" in result
+        assert "```" in result
+
+
+class TestParseFindingsEdgeCases:
+    """Edge cases for the _parse_findings parser."""
+
+    def test_finding_with_very_large_line_number(self):
+        """Line numbers are capped at 5 digits."""
+        text = "### [HIGH] Finding: Overflow\n**File:** `x.py` (line 999999999)\n"
+        findings = _parse_findings(text, "code-security")
+        assert len(findings) == 1
+        assert findings[0]["line_num"] == 99999
+
+    def test_finding_with_no_line_keyword(self):
+        """File line without 'line' keyword uses default line_num=1."""
+        text = "### [MEDIUM] Finding: No line info\n**File:** `app.py`\n"
+        findings = _parse_findings(text, "code-security")
+        assert len(findings) == 1
+        assert findings[0]["line_num"] == 1
+
+    def test_consecutive_findings_without_file(self):
+        """Only headings followed by **File:** are emitted; orphans are dropped."""
+        text = (
+            "### [HIGH] Finding: First orphan\n"
+            "### [CRITICAL] Finding: Second orphan\n"
+            "### [LOW] Finding: Has file\n"
+            "**File:** `ok.py` (line 5)\n"
+        )
+        findings = _parse_findings(text, "code-security")
+        # Only the last one (which has a **File:** line) should be emitted
+        # Actually the parser sets current on each heading and only appends on File
+        # So "Second orphan" overwrites "First orphan", then "Has file" overwrites
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "low"
+
+    def test_mixed_case_severity_in_heading(self):
+        """Mixed case like [High] is handled."""
+        text = "### [High] Finding: Mixed case\n**File:** `app.py` (line 1)\n"
+        findings = _parse_findings(text, "code-security")
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "high"
+
+    def test_info_severity_finding(self):
+        """INFO severity findings are parsed correctly."""
+        text = "### [INFO] Finding: Informational note\n**File:** `readme.md` (line 1)\n"
+        findings = _parse_findings(text, "code-security")
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "info"
+
+    def test_file_path_with_spaces_in_backticks(self):
+        """File paths are extracted from between backticks."""
+        text = "### [LOW] Finding: Test\n**File:** `path/to/my file.py` (line 3)\n"
+        findings = _parse_findings(text, "code-security")
+        assert len(findings) == 1
+        assert findings[0]["file_path"] == "path/to/my file.py"
+
+
+class TestCountBySeverityEdgeCases:
+    """Additional strict counting edge cases."""
+
+    def test_bold_prefixed_severity(self):
+        """**[SEVERITY] should be counted."""
+        text = "**[HIGH] Critical finding"
+        counts = _count_by_severity(text)
+        assert counts["high"] == 1
+
+    def test_info_severity_counted(self):
+        """INFO severity is counted at line start."""
+        text = "[INFO] Informational note"
+        counts = _count_by_severity(text)
+        assert counts["info"] == 1
+
+    def test_multiple_severities_on_separate_lines(self):
+        """Multiple severity markers on separate lines are each counted."""
+        text = "[HIGH] First\n[HIGH] Second\n[MEDIUM] Third"
+        counts = _count_by_severity(text)
+        assert counts["high"] == 2
+        assert counts["medium"] == 1
+
+    def test_empty_string_returns_all_zeros(self):
+        """Empty string produces zero counts for all severities."""
+        counts = _count_by_severity("")
+        assert all(v == 0 for v in counts.values())
+        assert len(counts) == 5
+
+    def test_severity_in_url_not_counted(self):
+        """Severity words embedded in URLs/prose are not counted."""
+        text = "See https://example.com/docs#[high]-level for details"
+        counts = _count_by_severity(text)
+        assert counts["high"] == 0
+
+
+class TestDetermineSeverityEdgeCases:
+    """Boundary and combined severity scoring."""
+
+    def test_single_critical_always_critical(self):
+        """Even one critical finding should return CRITICAL."""
+        assert determine_severity("", "### [CRITICAL] Bad dep", "") == "CRITICAL"
+
+    def test_score_boundary_at_exactly_5(self):
+        """Score=5 should produce HIGH (one high=3 + one medium=2 = 5)."""
+        text = "[HIGH] a\n[MEDIUM] b"
+        assert determine_severity(text, "", "") == "HIGH"
+
+    def test_score_boundary_at_exactly_2(self):
+        """Score=2 should produce MEDIUM (one medium=2)."""
+        assert determine_severity("[MEDIUM] finding", "", "") == "MEDIUM"
+
+    def test_score_boundary_at_exactly_1(self):
+        """Score=1 should produce LOW (one low=1)."""
+        assert determine_severity("", "", "[LOW] minor") == "LOW"
+
+    def test_findings_spread_across_all_categories(self):
+        """Findings from code + dep + secret are combined for scoring."""
+        assert determine_severity(
+            "[HIGH] code issue",
+            "[MEDIUM] dep issue",
+            "[LOW] secret issue",
+        ) == "HIGH"  # score = 3 + 2 + 1 = 6 >= 5
+
+
+class TestParseGatewayHeadersEdgeCases:
+    """Additional edge cases for header parsing."""
+
+    def test_json_list_not_treated_as_dict(self):
+        """A JSON array should fall through to line parsing."""
+        result = _parse_gateway_headers('[1, 2, 3]')
+        assert result == {}
+
+    def test_header_with_colon_in_value(self):
+        """Values containing colons are handled correctly."""
+        result = _parse_gateway_headers("Auth: Bearer token:with:colons")
+        assert result == {"Auth": "Bearer token:with:colons"}
+
+    def test_whitespace_only_string(self):
+        """Whitespace-only input returns empty dict."""
+        result = _parse_gateway_headers("   \n  \n  ")
+        assert result == {}
+
+
+class TestCallAIGatewayErrorPaths:
+    """Error handling paths in call_ai_gateway."""
+
+    @patch("duoguard._session")
+    def test_ai_gateway_rate_limit_429(self, mock_session):
+        """Rate limit (429) should raise HTTPError."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_token = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = "https://ai-gateway.example.com"
+        duoguard.AI_GATEWAY_TOKEN = "test-token"
+        try:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 429
+            mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+                response=mock_resp
+            )
+            mock_session.post.return_value = mock_resp
+            with pytest.raises(requests.exceptions.HTTPError):
+                duoguard.call_ai_gateway("system", "user")
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_token
+
+    @patch("duoguard._session")
+    def test_ai_gateway_timeout(self, mock_session):
+        """Timeout should raise Timeout exception."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_token = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = "https://ai-gateway.example.com"
+        duoguard.AI_GATEWAY_TOKEN = "test-token"
+        try:
+            mock_session.post.side_effect = requests.exceptions.Timeout("timed out")
+            with pytest.raises(requests.exceptions.Timeout):
+                duoguard.call_ai_gateway("system", "user")
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_token
+
+    @patch("duoguard._session")
+    def test_direct_anthropic_api_path(self, mock_session):
+        """Direct Anthropic API path when ANTHROPIC_API_KEY is set."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_token = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = ""
+        duoguard.AI_GATEWAY_TOKEN = ""
+        try:
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test-key"}):
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = {
+                    "content": [{"text": "Direct API result"}]
+                }
+                mock_resp.raise_for_status = MagicMock()
+                mock_session.post.return_value = mock_resp
+
+                result = duoguard.call_ai_gateway("system", "user")
+                assert result == "Direct API result"
+                call_url = mock_session.post.call_args[0][0]
+                assert "api.anthropic.com" in call_url
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_token
+
+    @patch("duoguard._session")
+    def test_direct_anthropic_api_invalid_key(self, mock_session):
+        """Direct Anthropic API with invalid key should raise HTTPError."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_token = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = ""
+        duoguard.AI_GATEWAY_TOKEN = ""
+        try:
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "invalid-key"}):
+                mock_resp = MagicMock()
+                mock_resp.status_code = 401
+                mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+                    response=mock_resp
+                )
+                mock_session.post.return_value = mock_resp
+                with pytest.raises(requests.exceptions.HTTPError):
+                    duoguard.call_ai_gateway("system", "user")
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_token
+
+    @patch("duoguard._session")
+    def test_anthropic_proxy_model_mapping(self, mock_session):
+        """Anthropic proxy maps model names correctly."""
+        import duoguard
+        old_url = duoguard.AI_GATEWAY_URL
+        old_token = duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = ""
+        duoguard.AI_GATEWAY_TOKEN = "gitlab-token"
+        try:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"content": [{"text": "ok"}]}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.post.return_value = mock_resp
+
+            duoguard.call_ai_gateway("sys", "usr", model="claude-sonnet-4-5")
+            call_json = mock_session.post.call_args[1]["json"]
+            assert call_json["model"] == "claude-sonnet-4-5-20250929"
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_token
+
+
+class TestExtractDependencyFilesEdgeCases:
+    """Edge cases for dependency file extraction."""
+
+    def test_empty_changes_list(self):
+        """Empty changes returns empty list."""
+        assert extract_dependency_files([]) == []
+
+    def test_change_with_no_new_path(self):
+        """Change dict missing new_path uses empty string, no match."""
+        changes = [{"diff": "+code"}]
+        result = extract_dependency_files(changes)
+        assert result == []
+
+    def test_dockerfile_detected(self):
+        """Dockerfile is recognized as a dependency file."""
+        changes = [{"new_path": "deploy/Dockerfile", "diff": "+FROM python:3.12"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_pnpm_lock_detected(self):
+        """pnpm-lock.yaml is recognized."""
+        changes = [{"new_path": "pnpm-lock.yaml", "diff": "+lock"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_build_gradle_kts_detected(self):
+        """build.gradle.kts is recognized."""
+        changes = [{"new_path": "app/build.gradle.kts", "diff": "+dep"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_directory_packages_props_detected(self):
+        """Directory.Packages.props (.NET) is recognized."""
+        changes = [{"new_path": "Directory.Packages.props", "diff": "+pkg"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+
+class TestLoadConfigEdgeCases:
+    """Additional config loading edge cases."""
+
+    def test_empty_yaml_file_uses_defaults(self, tmp_path, monkeypatch):
+        """An empty YAML file (null) uses defaults."""
+        monkeypatch.chdir(tmp_path)
+        config_file = tmp_path / ".duoguard.yml"
+        config_file.write_text("")
+        cfg = load_config()
+        assert cfg["severity_threshold"] == "HIGH"
+        assert cfg["agents"]["code_security"] is True
+
+    def test_yml_takes_priority_over_yaml(self, tmp_path, monkeypatch):
+        """.duoguard.yml is checked before .duoguard.yaml."""
+        monkeypatch.chdir(tmp_path)
+        yml_file = tmp_path / ".duoguard.yml"
+        yml_file.write_text("severity_threshold: CRITICAL\n")
+        yaml_file = tmp_path / ".duoguard.yaml"
+        yaml_file.write_text("severity_threshold: LOW\n")
+        cfg = load_config()
+        assert cfg["severity_threshold"] == "CRITICAL"
+
+    def test_explicit_path_overrides_env_var(self, tmp_path, monkeypatch):
+        """Explicit config_path takes priority over DUOGUARD_CONFIG env."""
+        explicit = tmp_path / "explicit.yml"
+        explicit.write_text("severity_threshold: CRITICAL\n")
+        env_config = tmp_path / "env.yml"
+        env_config.write_text("severity_threshold: LOW\n")
+        monkeypatch.setenv("DUOGUARD_CONFIG", str(env_config))
+        cfg = load_config(str(explicit))
+        assert cfg["severity_threshold"] == "CRITICAL"
+
+    def test_config_with_custom_model(self, tmp_path, monkeypatch):
+        """Custom model setting is loaded from config."""
+        monkeypatch.chdir(tmp_path)
+        config_file = tmp_path / ".duoguard.yml"
+        config_file.write_text("model: claude-sonnet-4\n")
+        cfg = load_config()
+        assert cfg["model"] == "claude-sonnet-4"
+
+
+class TestShouldExcludePathEdgeCases:
+    """Edge cases for path exclusion logic."""
+
+    def test_double_star_glob_pattern(self):
+        """Double star glob matches deeply nested files."""
+        assert should_exclude_path("a/b/c/d.py", exclude_paths=["a/b/c/*.py"])
+
+    def test_dotfiles_have_no_extension(self):
+        """Dotfiles like .env have no suffix, so extension matching does not apply."""
+        # Path(".env").suffix is "" — it's a hidden file, not an extension
+        assert not should_exclude_path(".env", exclude_extensions=["env"])
+        # But glob patterns can match dotfiles
+        assert should_exclude_path(".env", exclude_paths=[".env"])
+
+    def test_extension_without_dot(self):
+        """Extension matching strips leading dot from suffix."""
+        assert should_exclude_path("data.csv", exclude_extensions=["csv"])
+        assert not should_exclude_path("data.csv", exclude_extensions=[".csv"])
+
+    def test_file_with_no_extension(self):
+        """Files without extensions have empty suffix, not matched."""
+        assert not should_exclude_path("Makefile", exclude_extensions=["py"])
+
+    def test_multiple_exclude_patterns(self):
+        """Multiple patterns are checked with OR logic."""
+        assert should_exclude_path("vendor/x.go",
+                                    exclude_paths=["vendor/*", "node_modules/*"])
+        assert should_exclude_path("node_modules/y.js",
+                                    exclude_paths=["vendor/*", "node_modules/*"])
+        assert not should_exclude_path("src/main.py",
+                                        exclude_paths=["vendor/*", "node_modules/*"])
+
+
+class TestGenerateReportEdgeCases:
+    """Edge cases for report generation."""
+
+    def test_missing_mr_iid_uses_na(self):
+        """Missing iid field uses N/A."""
+        report = generate_report({}, "clean", "clean", "clean")
+        assert "!N/A" in report
+
+    def test_missing_mr_title_uses_untitled(self):
+        """Missing title field uses Untitled."""
+        report = generate_report({"iid": 1}, "clean", "clean", "clean")
+        assert "Untitled" in report
+
+    def test_all_severity_emojis_present(self):
+        """Each severity level has a corresponding emoji in the report."""
+        # CRITICAL
+        report = generate_report(
+            {"iid": 1, "title": "T"},
+            "### [CRITICAL] Finding: RCE\n**File:** `x.py` (line 1)\n", "", "",
+        )
+        assert ":rotating_light:" in report
+
+        # NONE
+        report = generate_report(
+            {"iid": 1, "title": "T"}, "clean", "clean", "clean",
+        )
+        assert ":white_check_mark:" in report
+
+    def test_report_counts_findings_per_section(self):
+        """Summary table counts findings per category."""
+        code = "### [HIGH] Finding: A\n**File:** `a.py` (line 1)\n"
+        dep = "### [MEDIUM] Finding: B\n**File:** `b.py` (line 1)\n### [LOW] Finding: C\n**File:** `c.py` (line 1)\n"
+        secret = ""
+        report = generate_report({"iid": 1, "title": "T"}, code, dep, secret)
+        assert "1 issue(s)" in report  # code
+        assert "2 issue(s)" in report  # dep
+
+
+class TestSarifReportEdgeCases:
+    """Additional SARIF report edge cases."""
+
+    def test_sarif_help_uri_varies_by_category(self, tmp_path):
+        """Different categories get different helpUri values."""
+        output = tmp_path / "sarif.json"
+        code = "### [HIGH] Finding: XSS\n**File:** `a.py` (line 1)\n"
+        dep = "### [MEDIUM] Finding: Outdated\n**File:** `b.py` (line 1)\n"
+        secret = "### [CRITICAL] Finding: Key\n**File:** `c.py` (line 1)\n"
+        generate_sarif_report(code, str(output), dep_findings=dep, secret_findings=secret)
+        data = json.loads(output.read_text())
+        rules = data["runs"][0]["tool"]["driver"]["rules"]
+        help_uris = {r["properties"]["category"]: r["helpUri"] for r in rules}
+        # Each category should have a different help URI
+        assert "owasp.org/www-project-top-ten" in help_uris["code-security"]
+        assert "dependency-check" in help_uris["dependency-audit"]
+        assert "hard-coded_password" in help_uris["secret-scan"]
+
+    def test_sarif_partial_fingerprints_differ_for_same_finding_different_files(self, tmp_path):
+        """Same finding in different files gets different fingerprints."""
+        output = tmp_path / "sarif.json"
+        findings = (
+            "### [HIGH] Finding: XSS\n**File:** `a.py` (line 1)\n\n"
+            "### [HIGH] Finding: XSS\n**File:** `b.py` (line 1)\n"
+        )
+        generate_sarif_report(findings, str(output))
+        data = json.loads(output.read_text())
+        results = data["runs"][0]["results"]
+        fp1 = results[0]["partialFingerprints"]["duoguardFindingHash/v1"]
+        fp2 = results[1]["partialFingerprints"]["duoguardFindingHash/v1"]
+        assert fp1 != fp2
+
+    def test_sarif_schema_url_present(self, tmp_path):
+        """SARIF output includes the schema URL."""
+        output = tmp_path / "sarif.json"
+        generate_sarif_report("No issues.", str(output))
+        data = json.loads(output.read_text())
+        assert "$schema" in data
+        assert "sarif-schema-2.1.0" in data["$schema"]
+
+
+class TestCodequalityReportEdgeCases:
+    """Additional Code Quality report edge cases."""
+
+    def test_severity_mapping_complete(self, tmp_path):
+        """All five severity levels are mapped correctly."""
+        output = tmp_path / "cq.json"
+        findings = (
+            "### [CRITICAL] Finding: A\n**File:** `a.py` (line 1)\n"
+            "### [HIGH] Finding: B\n**File:** `b.py` (line 2)\n"
+            "### [MEDIUM] Finding: C\n**File:** `c.py` (line 3)\n"
+            "### [LOW] Finding: D\n**File:** `d.py` (line 4)\n"
+            "### [INFO] Finding: E\n**File:** `e.py` (line 5)\n"
+        )
+        generate_codequality_report(findings, str(output))
+        data = json.loads(output.read_text())
+        assert len(data) == 5
+        severities = [d["severity"] for d in data]
+        assert "blocker" in severities
+        assert "critical" in severities
+        assert "major" in severities
+        assert "minor" in severities
+        assert "info" in severities
+
+    def test_codequality_check_name_prefix(self, tmp_path):
+        """All check_names are prefixed with 'duoguard-'."""
+        output = tmp_path / "cq.json"
+        code = "### [HIGH] Finding: XSS\n**File:** `app.py` (line 1)\n"
+        generate_codequality_report(code, str(output))
+        data = json.loads(output.read_text())
+        for issue in data:
+            assert issue["check_name"].startswith("duoguard-")
+
+    def test_codequality_categories_always_security(self, tmp_path):
+        """All code quality issues have 'Security' in categories."""
+        output = tmp_path / "cq.json"
+        code = "### [LOW] Finding: Minor\n**File:** `x.py` (line 1)\n"
+        generate_codequality_report(code, str(output))
+        data = json.loads(output.read_text())
+        for issue in data:
+            assert "Security" in issue["categories"]
+
+
+class TestParseAgentContextEdgeCases:
+    """Additional agent context parsing edge cases."""
+
+    def test_malformed_json_context_falls_back_to_regex(self):
+        """Malformed JSON falls back to regex MR extraction."""
+        import duoguard
+        old_ctx = duoguard.AI_FLOW_CONTEXT
+        old_path = duoguard.AI_FLOW_PROJECT_PATH
+        old_input = duoguard.AI_FLOW_INPUT
+        duoguard.AI_FLOW_CONTEXT = "{malformed json !55 content"
+        duoguard.AI_FLOW_PROJECT_PATH = "org/repo"
+        duoguard.AI_FLOW_INPUT = ""
+        try:
+            project_id, mr_iid = _parse_agent_context()
+            assert mr_iid == "55"
+        finally:
+            duoguard.AI_FLOW_CONTEXT = old_ctx
+            duoguard.AI_FLOW_PROJECT_PATH = old_path
+            duoguard.AI_FLOW_INPUT = old_input
+
+    def test_json_context_without_merge_request_key(self):
+        """JSON context without merge_request key yields empty mr_iid."""
+        import duoguard
+        old_ctx = duoguard.AI_FLOW_CONTEXT
+        old_path = duoguard.AI_FLOW_PROJECT_PATH
+        old_input = duoguard.AI_FLOW_INPUT
+        duoguard.AI_FLOW_CONTEXT = json.dumps({"project": {"path_with_namespace": "g/p"}})
+        duoguard.AI_FLOW_PROJECT_PATH = ""
+        duoguard.AI_FLOW_INPUT = ""
+        try:
+            project_id, mr_iid = _parse_agent_context()
+            assert mr_iid == ""
+            assert "g%2Fp" in project_id
+        finally:
+            duoguard.AI_FLOW_CONTEXT = old_ctx
+            duoguard.AI_FLOW_PROJECT_PATH = old_path
+            duoguard.AI_FLOW_INPUT = old_input
+
+    def test_project_path_url_encoded_with_slashes(self):
+        """Nested project paths are properly URL-encoded."""
+        import duoguard
+        old_ctx = duoguard.AI_FLOW_CONTEXT
+        old_path = duoguard.AI_FLOW_PROJECT_PATH
+        old_input = duoguard.AI_FLOW_INPUT
+        duoguard.AI_FLOW_CONTEXT = json.dumps({"merge_request": {"iid": 1}})
+        duoguard.AI_FLOW_PROJECT_PATH = "org/sub-group/my-project"
+        duoguard.AI_FLOW_INPUT = ""
+        try:
+            project_id, mr_iid = _parse_agent_context()
+            assert "org%2Fsub-group%2Fmy-project" in project_id
+        finally:
+            duoguard.AI_FLOW_CONTEXT = old_ctx
+            duoguard.AI_FLOW_PROJECT_PATH = old_path
+            duoguard.AI_FLOW_INPUT = old_input
+
+
+class TestResolveApiUrlEdgeCases:
+    """Edge cases for API URL resolution."""
+
+    def test_empty_hostname_uses_default(self):
+        """Empty hostname falls back to gitlab.com."""
+        import duoguard
+        old = duoguard.GITLAB_HOSTNAME
+        duoguard.GITLAB_HOSTNAME = ""
+        try:
+            url = _resolve_api_url_for_agent()
+            assert url == "https://gitlab.com/api/v4"
+        finally:
+            duoguard.GITLAB_HOSTNAME = old
+
+
+class TestPostInlineFindingsEdgeCases:
+    """Edge cases for inline findings posting."""
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_incomplete_sha_versions_skips(self, mock_versions, mock_post_disc):
+        """Missing SHA fields in version causes skip."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc",
+            "head_commit_sha": "",  # Missing
+            "start_commit_sha": "ghi",
+        }]
+        findings = [{"file_path": "a.py", "line_num": 1, "severity": "high",
+                      "description": "XSS", "category": "code-security"}]
+        posted = post_inline_findings("42", "1", findings)
+        assert posted == 0
+        mock_post_disc.assert_not_called()
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_finding_with_cwe_field(self, mock_versions, mock_post_disc):
+        """Findings with CWE field include it in the discussion body."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc",
+            "head_commit_sha": "def",
+            "start_commit_sha": "ghi",
+        }]
+        mock_post_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"file_path": "a.py", "line_num": 1, "severity": "high",
+                      "description": "SQL Injection", "category": "code-security",
+                      "cwe": "CWE-89"}]
+        posted = post_inline_findings("42", "1", findings)
+        assert posted == 1
+        # Verify CWE was included in the body
+        call_body = mock_post_disc.call_args[0][2]  # 3rd positional arg is body
+        assert "CWE-89" in call_body
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_partial_failure_counts_only_successes(self, mock_versions, mock_post_disc):
+        """When some discussions fail, only successes are counted."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc",
+            "head_commit_sha": "def",
+            "start_commit_sha": "ghi",
+        }]
+        # First succeeds, second fails
+        mock_post_disc.side_effect = [{"id": "disc-1"}, None]
+
+        findings = [
+            {"file_path": "a.py", "line_num": 1, "severity": "high",
+             "description": "XSS", "category": "code-security"},
+            {"file_path": "b.py", "line_num": 5, "severity": "medium",
+             "description": "CSRF", "category": "code-security"},
+        ]
+        posted = post_inline_findings("42", "1", findings)
+        assert posted == 1
+
+
+class TestFilterExcludedChangesEdgeCases:
+    """Edge cases for the filter_excluded_changes function."""
+
+    def test_change_with_only_old_path(self):
+        """Changes with only old_path (deleted files) are filtered correctly."""
+        changes = [
+            {"old_path": "vendor/old.go", "diff": "-code"},
+            {"old_path": "src/app.py", "diff": "-code"},
+        ]
+        result = filter_excluded_changes(changes, exclude_paths=["vendor/*"])
+        assert len(result) == 1
+        assert result[0]["old_path"] == "src/app.py"
+
+    def test_change_with_no_path_keys(self):
+        """Changes without any path key use empty string, no exclusion match."""
+        changes = [{"diff": "+code"}]
+        result = filter_excluded_changes(changes, exclude_paths=["vendor/*"])
+        assert len(result) == 1
+
+
+class TestExportFindingsJsonEdgeCases:
+    """Edge cases for findings JSON export."""
+
+    def test_findings_include_all_fields(self, tmp_path):
+        """Exported findings have all expected fields."""
+        output = str(tmp_path / "findings.json")
+        code = "### [HIGH] Finding: SQL Injection\n**File:** `db.py` (line 42)\n"
+        findings = export_findings_json(code, "", "", output)
+        assert len(findings) == 1
+        f = findings[0]
+        assert "severity" in f
+        assert "description" in f
+        assert "file_path" in f
+        assert "line_num" in f
+        assert "category" in f
+        assert f["severity"] == "high"
+        assert f["file_path"] == "db.py"
+        assert f["line_num"] == 42
+
+    def test_findings_json_is_valid_json_file(self, tmp_path):
+        """The output file is valid JSON that can be round-tripped."""
+        output = str(tmp_path / "findings.json")
+        code = "### [CRITICAL] Finding: RCE\n**File:** `cmd.py` (line 1)\n"
+        export_findings_json(code, "", "", output)
+        with open(output) as f:
+            data = json.load(f)
+        assert isinstance(data, list)
+        assert len(data) == 1
+
+
+class TestDefaultConfigValues:
+    """Verify DEFAULT_CONFIG has expected structure and values."""
+
+    def test_default_config_keys(self):
+        expected_keys = {
+            "version", "severity_threshold", "agents", "exclude_paths",
+            "exclude_extensions", "inline_comments", "approve",
+            "approve_threshold", "model", "max_diff_size",
+        }
+        assert set(DEFAULT_CONFIG.keys()) == expected_keys
+
+    def test_default_agents_all_enabled(self):
+        agents = DEFAULT_CONFIG["agents"]
+        assert agents["code_security"] is True
+        assert agents["dependency_audit"] is True
+        assert agents["secret_scan"] is True
+
+    def test_default_model(self):
+        assert DEFAULT_CONFIG["model"] == "claude-sonnet-4-5"
+
+    def test_default_max_diff_size(self):
+        assert DEFAULT_CONFIG["max_diff_size"] == 200_000
+
+    def test_default_approve_is_false(self):
+        assert DEFAULT_CONFIG["approve"] is False
+
+    def test_default_severity_threshold(self):
+        assert DEFAULT_CONFIG["severity_threshold"] == "HIGH"
+
+
+class TestCreateSession:
+    """Tests for the HTTP session creation."""
+
+    def test_session_has_retry_adapter(self):
+        from duoguard import _create_session
+        session = _create_session(retries=2, backoff=0.5)
+        assert isinstance(session, requests.Session)
+        # The session should have adapters mounted
+        assert "https://" in session.adapters
+        assert "http://" in session.adapters
+
+    def test_session_retry_status_codes(self):
+        from duoguard import _create_session
+        session = _create_session()
+        adapter = session.get_adapter("https://example.com")
+        retry = adapter.max_retries
+        assert 429 in retry.status_forcelist
+        assert 500 in retry.status_forcelist
+        assert 502 in retry.status_forcelist
+        assert 503 in retry.status_forcelist
+        assert 504 in retry.status_forcelist

@@ -1,0 +1,59 @@
+stages:
+  - security-review
+  - report
+
+variables:
+  DUOGUARD_REPORT_FILE: duoguard-report.md
+
+# Run DuoGuard security analysis on merge requests
+duoguard-security-scan:
+  stage: security-review
+  image: python:3.12-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    GIT_DEPTH: 0
+  before_script:
+    - pip install --quiet -r requirements.txt
+  script:
+    - echo "Running DuoGuard Security Review..."
+    - python scripts/duoguard.py
+      --project-id "$CI_PROJECT_ID"
+      --mr-iid "$CI_MERGE_REQUEST_IID"
+      --output "$DUOGUARD_REPORT_FILE"
+      --sarif duoguard-sarif.json
+  artifacts:
+    paths:
+      - $DUOGUARD_REPORT_FILE
+      - duoguard-sarif.json
+      - duoguard-findings.json
+      - duoguard-codequality.json
+      - duoguard-severity.txt
+    reports:
+      codequality: duoguard-codequality.json
+      sast: duoguard-sarif.json
+    when: always
+    expire_in: 30 days
+
+# Post report as MR comment + inline discussions + labels + approval
+duoguard-post-report:
+  stage: report
+  image: python:3.12-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  needs:
+    - duoguard-security-scan
+  before_script:
+    - pip install --quiet requests
+  script:
+    - |
+      SEVERITY=$(cat duoguard-severity.txt 2>/dev/null || echo "NONE")
+      python scripts/post_report.py \
+        --project-id "$CI_PROJECT_ID" \
+        --mr-iid "$CI_MERGE_REQUEST_IID" \
+        --report-file "$DUOGUARD_REPORT_FILE" \
+        --findings-file duoguard-findings.json \
+        --approve \
+        --severity "$SEVERITY" \
+        --approve-threshold HIGH
+  allow_failure: true
