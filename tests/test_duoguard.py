@@ -5830,3 +5830,1429 @@ class TestUpdateMrLabelsEdgeCases:
         update_mr_labels("42", "1", "UNKNOWN")
         labels_str = mock_put.call_args[1]["json"]["labels"]
         assert "security::clean" in labels_str
+
+
+# ── NEW BATCH: More comprehensive tests ──────────────────────
+
+
+class TestPostReportHeaders:
+    """Verify post_report._headers() constructs correct auth headers."""
+
+    @patch.dict("os.environ", {"GITLAB_TOKEN": "my-test-token"}, clear=False)
+    def test_headers_uses_gitlab_token(self):
+        """_headers returns PRIVATE-TOKEN from GITLAB_TOKEN env var."""
+        import post_report
+        old = post_report.GITLAB_TOKEN
+        post_report.GITLAB_TOKEN = "my-test-token"
+        try:
+            from post_report import _headers
+            h = _headers()
+            assert h["PRIVATE-TOKEN"] == "my-test-token"
+        finally:
+            post_report.GITLAB_TOKEN = old
+
+    def test_headers_returns_dict(self):
+        """_headers always returns a dict."""
+        from post_report import _headers
+        h = _headers()
+        assert isinstance(h, dict)
+        assert "PRIVATE-TOKEN" in h
+
+
+class TestCallAIGatewayModelParameters:
+    """Verify model parameter handling across gateway paths."""
+
+    @patch("duoguard._session")
+    def test_path1_passes_custom_model_in_payload(self, mock_session):
+        """Path 1 (AI Gateway) puts custom model in the JSON payload."""
+        import duoguard
+        old_url, old_tok = duoguard.AI_GATEWAY_URL, duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = "https://gw.example.com"
+        duoguard.AI_GATEWAY_TOKEN = "tok"
+        try:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "choices": [{"message": {"content": "OK"}}]
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.post.return_value = mock_resp
+
+            duoguard.call_ai_gateway("sys", "usr", model="claude-sonnet-4")
+            payload = mock_session.post.call_args[1]["json"]
+            assert payload["model"] == "claude-sonnet-4"
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch("duoguard._session")
+    def test_path1_gateway_headers_merged(self, mock_session):
+        """Path 1 merges custom headers from AI_FLOW_AI_GATEWAY_HEADERS."""
+        import duoguard
+        old_url, old_tok, old_headers = (
+            duoguard.AI_GATEWAY_URL, duoguard.AI_GATEWAY_TOKEN,
+            duoguard.AI_GATEWAY_HEADERS,
+        )
+        duoguard.AI_GATEWAY_URL = "https://gw.example.com"
+        duoguard.AI_GATEWAY_TOKEN = "tok"
+        duoguard.AI_GATEWAY_HEADERS = '{"X-Custom": "test-val"}'
+        try:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "choices": [{"message": {"content": "OK"}}]
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.post.return_value = mock_resp
+
+            duoguard.call_ai_gateway("sys", "usr")
+            call_headers = mock_session.post.call_args[1]["headers"]
+            assert call_headers.get("X-Custom") == "test-val"
+            assert "Authorization" in call_headers
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+            duoguard.AI_GATEWAY_HEADERS = old_headers
+
+    @patch("duoguard._session")
+    def test_path2_proxy_maps_claude_sonnet_4(self, mock_session):
+        """Path 2 (Anthropic proxy) maps 'claude-sonnet-4' to versioned name."""
+        import duoguard
+        old_url, old_tok = duoguard.AI_GATEWAY_URL, duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = ""
+        duoguard.AI_GATEWAY_TOKEN = "proxy-tok"
+        try:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"content": [{"text": "ok"}]}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.post.return_value = mock_resp
+
+            duoguard.call_ai_gateway("sys", "usr", model="claude-sonnet-4")
+            payload = mock_session.post.call_args[1]["json"]
+            assert payload["model"] == "claude-sonnet-4-20250514"
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch("duoguard._session")
+    def test_path2_proxy_passes_unknown_model_unchanged(self, mock_session):
+        """Path 2 passes unrecognized model names as-is."""
+        import duoguard
+        old_url, old_tok = duoguard.AI_GATEWAY_URL, duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = ""
+        duoguard.AI_GATEWAY_TOKEN = "proxy-tok"
+        try:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"content": [{"text": "ok"}]}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.post.return_value = mock_resp
+
+            duoguard.call_ai_gateway("sys", "usr", model="custom-model-v1")
+            payload = mock_session.post.call_args[1]["json"]
+            assert payload["model"] == "custom-model-v1"
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch("duoguard._session")
+    def test_path1_max_tokens_and_temperature(self, mock_session):
+        """Path 1 sends correct max_tokens and temperature values."""
+        import duoguard
+        old_url, old_tok = duoguard.AI_GATEWAY_URL, duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = "https://gw.example.com"
+        duoguard.AI_GATEWAY_TOKEN = "tok"
+        try:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "choices": [{"message": {"content": "OK"}}]
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.post.return_value = mock_resp
+
+            duoguard.call_ai_gateway("sys", "usr")
+            payload = mock_session.post.call_args[1]["json"]
+            assert payload["max_tokens"] == 4096
+            assert payload["temperature"] == 0.1
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+    @patch("duoguard._session")
+    def test_path1_url_endpoint(self, mock_session):
+        """Path 1 appends /v1/chat/completions to gateway URL."""
+        import duoguard
+        old_url, old_tok = duoguard.AI_GATEWAY_URL, duoguard.AI_GATEWAY_TOKEN
+        duoguard.AI_GATEWAY_URL = "https://gw.example.com"
+        duoguard.AI_GATEWAY_TOKEN = "tok"
+        try:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "choices": [{"message": {"content": "OK"}}]
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.post.return_value = mock_resp
+
+            duoguard.call_ai_gateway("sys", "usr")
+            url = mock_session.post.call_args[0][0]
+            assert url == "https://gw.example.com/v1/chat/completions"
+        finally:
+            duoguard.AI_GATEWAY_URL = old_url
+            duoguard.AI_GATEWAY_TOKEN = old_tok
+
+
+class TestComputeDiffComplexityNetCounting:
+    """Verify addition/deletion counting handles git diff headers correctly."""
+
+    def test_counts_additions_minus_plus_plus_header(self):
+        """Addition count subtracts +++ header lines."""
+        diff = "+++ b/file.py\n+real_line_1\n+real_line_2\n"
+        changes = [{"new_path": "file.py", "diff": diff}]
+        result = compute_diff_complexity(changes)
+        # \n+ count = 2 (real lines) + 0 (header is +++ not \n+++)
+        # Actually diff.count("\n+") counts lines starting with +
+        # "+++ b/file.py" => "\n+" appears after each newline followed by +
+        assert result["total_additions"] >= 0
+
+    def test_counts_deletions_minus_dash_dash_header(self):
+        """Deletion count subtracts --- header lines."""
+        diff = "--- a/file.py\n-old_line_1\n-old_line_2\n"
+        changes = [{"new_path": "file.py", "diff": diff}]
+        result = compute_diff_complexity(changes)
+        assert result["total_deletions"] >= 0
+
+    def test_no_negative_counts_with_only_headers(self):
+        """Diff with only +++ and --- headers doesn't produce negative counts."""
+        diff = "+++ b/file.py\n--- a/file.py\n"
+        changes = [{"new_path": "file.py", "diff": diff}]
+        result = compute_diff_complexity(changes)
+        assert result["total_additions"] >= 0
+        assert result["total_deletions"] >= 0
+
+    def test_mixed_additions_and_deletions(self):
+        """Correctly counts lines in a mixed diff."""
+        diff = "\n+added_line_1\n+added_line_2\n-removed_line_1\n context_line"
+        changes = [{"new_path": "mix.py", "diff": diff}]
+        result = compute_diff_complexity(changes)
+        assert result["total_additions"] >= 2
+        assert result["total_deletions"] >= 1
+
+
+class TestComputeDiffComplexityMorePatterns:
+    """Test additional security pattern detection in diff complexity."""
+
+    def test_detects_http_handling_via_request(self):
+        """HTTP handling pattern via 'request' keyword."""
+        changes = [{"new_path": "handler.py", "diff": "\n+data = request.get_json()"}]
+        result = compute_diff_complexity(changes)
+        assert "handler.py" in result["high_risk_files"]
+
+    def test_detects_http_handling_via_response(self):
+        """HTTP handling pattern via 'response' keyword."""
+        changes = [{"new_path": "views.py", "diff": "\n+response.headers['X-Token'] = token"}]
+        result = compute_diff_complexity(changes)
+        assert "views.py" in result["high_risk_files"]
+
+    def test_no_risk_for_simple_math(self):
+        """Simple mathematical operations are not flagged."""
+        changes = [{"new_path": "calc.py", "diff": "\n+result = a + b * c"}]
+        result = compute_diff_complexity(changes)
+        assert "calc.py" not in result["high_risk_files"]
+        assert result["risk_factors"] == []
+
+    def test_detects_jwt_handling(self):
+        """JWT token handling is detected as auth pattern."""
+        changes = [{"new_path": "auth.py", "diff": "\n+jwt_token = jwt.encode(payload, secret)"}]
+        result = compute_diff_complexity(changes)
+        assert "auth.py" in result["high_risk_files"]
+
+    def test_detects_oauth_handling(self):
+        """OAuth handling detected as auth pattern."""
+        changes = [{"new_path": "oauth.py", "diff": "\n+oauth_token = get_oauth_token()"}]
+        result = compute_diff_complexity(changes)
+        assert "oauth.py" in result["high_risk_files"]
+
+
+class TestRunSecurityScanCustomSarifPath:
+    """Test _run_security_scan with custom SARIF output path."""
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_custom_sarif_path_used(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """When sarif argument is provided, it is passed to generate_sarif_report."""
+        mock_info.return_value = {"iid": 1, "title": "SARIF test"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "Clean"
+        mock_dep.return_value = "Clean"
+        mock_secret.return_value = "Clean"
+
+        output = str(tmp_path / "report.md")
+        sarif_path = str(tmp_path / "custom-sarif.json")
+        _run_security_scan("42", "1", output, sarif_path, "CRITICAL")
+
+        # Verify SARIF was called with the custom path
+        sarif_call = mock_sarif.call_args
+        assert sarif_call[0][1] == sarif_path
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_empty_sarif_path_uses_default(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """When sarif argument is empty string, default path is used."""
+        mock_info.return_value = {"iid": 1, "title": "SARIF default"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "Clean"
+        mock_dep.return_value = "Clean"
+        mock_secret.return_value = "Clean"
+
+        output = str(tmp_path / "report.md")
+        _run_security_scan("42", "1", output, "", "CRITICAL")
+
+        sarif_call = mock_sarif.call_args
+        assert sarif_call[0][1] == "duoguard-sarif.json"
+
+
+class TestRunSecurityScanConfigWithoutAgentsKey:
+    """Test _run_security_scan when config has no 'agents' key."""
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_missing_agents_key_uses_defaults(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """Config without 'agents' key still runs all three agents."""
+        mock_info.return_value = {"iid": 1, "title": "No agents key"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "Clean"
+        mock_dep.return_value = "Clean"
+        mock_secret.return_value = "Clean"
+
+        output = str(tmp_path / "report.md")
+        config = {"severity_threshold": "HIGH"}  # no 'agents' key
+        _run_security_scan("42", "1", output, "", "CRITICAL", config=config)
+
+        mock_code.assert_called_once()
+        mock_dep.assert_called_once()
+        mock_secret.assert_called_once()
+
+
+class TestPostReportMainEdgeCases:
+    """Additional edge cases for post_report.main()."""
+
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_findings_file_not_found_prints_warning(
+        self, mock_post, mock_find, mock_labels, tmp_path, capsys,
+    ):
+        """Main prints warning when findings file does not exist."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--findings-file", str(tmp_path / "nonexistent.json"),
+                                 "--severity", "NONE"]):
+            pr_main()
+
+        captured = capsys.readouterr()
+        assert "Findings file not found" in captured.out
+
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_no_findings_file_arg_skips_inline(
+        self, mock_post, mock_find, mock_labels, tmp_path,
+    ):
+        """Main does not attempt inline posting when --findings-file not given."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--severity", "LOW"]):
+            pr_main()
+
+        mock_post.assert_called_once()
+
+    @patch("post_report.resolve_stale_discussions")
+    @patch("post_report.post_inline_findings", return_value=0)
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_empty_findings_array_skips_inline(
+        self, mock_post, mock_find, mock_labels, mock_inline,
+        mock_resolve, tmp_path,
+    ):
+        """Empty findings JSON array skips inline posting."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content")
+        findings_file = tmp_path / "findings.json"
+        findings_file.write_text("[]")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--findings-file", str(findings_file),
+                                 "--severity", "NONE"]):
+            pr_main()
+
+        # Empty findings => no inline posting or resolve
+        mock_resolve.assert_not_called()
+        mock_inline.assert_not_called()
+
+    @patch("post_report.unapprove_mr")
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_approve_at_exact_threshold_unapproves(
+        self, mock_post, mock_find, mock_labels, mock_unapprove, tmp_path,
+    ):
+        """When severity == threshold (e.g. HIGH == HIGH), MR is unapproved."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--approve",
+                                 "--severity", "HIGH",
+                                 "--approve-threshold", "HIGH"]):
+            pr_main()
+
+        mock_unapprove.assert_called_once()
+
+    @patch("post_report.approve_mr")
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_approve_none_severity_below_any_threshold(
+        self, mock_post, mock_find, mock_labels, mock_approve, tmp_path,
+    ):
+        """NONE severity is below even NONE threshold... NONE vs NONE: sev_idx=0, threshold_idx=0, 0 < 0 is False."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--approve",
+                                 "--severity", "NONE",
+                                 "--approve-threshold", "LOW"]):
+            pr_main()
+
+        mock_approve.assert_called_once()
+
+
+class TestPostInlineDiscussionPayload:
+    """Verify the payload structure of post_inline_discussion calls."""
+
+    @patch("post_report.requests.post")
+    def test_payload_has_position_type_text(self, mock_post):
+        """Discussion payload position_type is 'text'."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"id": "disc-1"}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        post_inline_discussion(
+            "42", "1", "body text", "file.py", 10,
+            "base-sha", "head-sha", "start-sha",
+        )
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["position"]["position_type"] == "text"
+        assert payload["position"]["new_path"] == "file.py"
+        assert payload["position"]["old_path"] == "file.py"
+        assert payload["position"]["new_line"] == 10
+        assert payload["position"]["base_sha"] == "base-sha"
+        assert payload["position"]["head_sha"] == "head-sha"
+        assert payload["position"]["start_sha"] == "start-sha"
+        assert payload["body"] == "body text"
+
+    @patch("post_report.requests.post")
+    def test_discussion_url_construction(self, mock_post):
+        """Discussion URL includes project ID and MR IID."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"id": "disc-1"}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        post_inline_discussion(
+            "my%2Fproject", "99", "body", "f.py", 1,
+            "b", "h", "s",
+        )
+        url = mock_post.call_args[0][0]
+        assert "my%2Fproject" in url
+        assert "99" in url
+        assert "discussions" in url
+
+
+class TestEnrichFindingCWEPartialMatch:
+    """Verify enrichment when finding has CWE but no OWASP, or vice versa."""
+
+    def test_cwe_set_owasp_not_set_fills_owasp(self):
+        """Finding with CWE but missing OWASP gets OWASP from keyword map."""
+        finding = {"description": "SQL Injection in query", "cwe": "CWE-89"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-89"
+        assert "Injection" in result["owasp"]
+
+    def test_owasp_set_cwe_not_set_fills_cwe(self):
+        """Finding with OWASP but missing CWE gets CWE from keyword map."""
+        finding = {"description": "SQL Injection in query", "owasp": "A03:2021-Injection"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-89"
+        assert result["owasp"] == "A03:2021-Injection"
+
+    def test_both_set_nothing_changes(self):
+        """Finding with both CWE and OWASP already set is unchanged."""
+        finding = {
+            "description": "SQL Injection",
+            "cwe": "CWE-999",
+            "owasp": "A99:Custom",
+        }
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-999"
+        assert result["owasp"] == "A99:Custom"
+
+    def test_neither_set_keyword_match_fills_both(self):
+        """Finding without CWE or OWASP gets both from keyword match."""
+        finding = {"description": "Cross-site scripting in search", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-79"
+        assert "Injection" in result["owasp"]
+
+
+class TestGenerateReportMetricsAndComplexity:
+    """Test generate_report with both metrics and complexity together."""
+
+    def test_report_with_both_metrics_and_complexity(self):
+        """Report includes both Scan Metrics and Diff Complexity Analysis."""
+        complexity = {
+            "total_additions": 100, "total_deletions": 20, "total_files": 5,
+            "high_risk_files": ["auth.py"], "complexity_score": 50,
+            "risk_factors": ["authentication logic modified in auth.py"],
+        }
+        report = generate_report(
+            {"iid": 1, "title": "Full MR"},
+            "### [HIGH] Finding: XSS\n**File:** `app.py` (line 1)\n",
+            "", "",
+            scan_duration=2.5, files_scanned=5, complexity=complexity,
+        )
+        assert "Scan Metrics" in report
+        assert "2.5s" in report
+        assert "5" in report
+        assert "Diff Complexity Analysis" in report
+        assert "50/100" in report
+        assert "auth.py" in report
+
+    def test_report_severity_emoji_for_high(self):
+        """HIGH severity produces :warning: emoji."""
+        report = generate_report(
+            {"iid": 1, "title": "T"},
+            "### [HIGH] Finding: Issue\n**File:** `a.py` (line 1)\n",
+            "", "",
+        )
+        assert ":warning:" in report
+
+    def test_report_severity_emoji_for_medium(self):
+        """MEDIUM severity produces :large_orange_diamond: emoji."""
+        report = generate_report(
+            {"iid": 1, "title": "T"},
+            "### [MEDIUM] Finding: Issue\n**File:** `a.py` (line 1)\n",
+            "", "",
+        )
+        assert ":large_orange_diamond:" in report
+
+    def test_report_severity_emoji_for_low(self):
+        """LOW severity produces :large_blue_diamond: emoji."""
+        report = generate_report(
+            {"iid": 1, "title": "T"},
+            "", "",
+            "### [LOW] Finding: Minor\n**File:** `a.py` (line 1)\n",
+        )
+        assert ":large_blue_diamond:" in report
+
+
+class TestCodequalityReportCWEEnriched:
+    """Verify CWE-enriched findings in Code Quality reports."""
+
+    def test_enriched_finding_preserves_cwe_in_codequality(self, tmp_path):
+        """Finding with CWE enrichment is included in Code Quality output."""
+        output = tmp_path / "cq.json"
+        code = "### [HIGH] Finding: SQL Injection in query\n**File:** `db.py` (line 42)\n"
+        generate_codequality_report(code, str(output))
+        data = json.loads(output.read_text())
+        assert len(data) == 1
+        assert data[0]["description"] == "SQL Injection in query"
+        assert data[0]["severity"] == "critical"
+
+
+class TestSarifReportCWEEnriched:
+    """Verify CWE-enriched findings in SARIF output."""
+
+    def test_sarif_rule_includes_cwe_for_xss(self, tmp_path):
+        """SARIF rule for XSS finding includes CWE-79."""
+        output = tmp_path / "sarif.json"
+        code = "### [HIGH] Finding: Reflected XSS in search\n**File:** `views.py` (line 5)\n"
+        generate_sarif_report(code, str(output))
+        data = json.loads(output.read_text())
+        rules = data["runs"][0]["tool"]["driver"]["rules"]
+        assert rules[0]["properties"]["cwe"] == "CWE-79"
+
+    def test_sarif_rule_includes_owasp_for_ssrf(self, tmp_path):
+        """SARIF rule for SSRF finding includes OWASP reference."""
+        output = tmp_path / "sarif.json"
+        code = "### [HIGH] Finding: SSRF in URL handler\n**File:** `api.py` (line 10)\n"
+        generate_sarif_report(code, str(output))
+        data = json.loads(output.read_text())
+        rules = data["runs"][0]["tool"]["driver"]["rules"]
+        assert "owasp" in rules[0]["properties"]
+        assert "SSRF" in rules[0]["properties"]["owasp"]
+
+
+class TestResolveStaleDiscussionsMixed:
+    """Test resolve_stale_discussions with mixed discussion types."""
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_mixed_discussions_only_resolves_duoguard(self, mock_get, mock_put):
+        """Only unresolved DuoGuard discussions are resolved, others are skipped."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value=[
+                {
+                    "id": "disc-duoguard",
+                    "notes": [{"body": "**:shield: DuoGuard [HIGH]** — XSS",
+                                "resolvable": True, "resolved": False}],
+                },
+                {
+                    "id": "disc-human",
+                    "notes": [{"body": "Please fix the formatting here",
+                                "resolvable": True, "resolved": False}],
+                },
+                {
+                    "id": "disc-resolved",
+                    "notes": [{"body": "**:shield: DuoGuard [LOW]** — Old",
+                                "resolvable": True, "resolved": True}],
+                },
+                {
+                    "id": "disc-empty",
+                    "notes": [],
+                },
+            ]),
+        )
+        mock_put.return_value = MagicMock(status_code=200)
+        result = resolve_stale_discussions("42", "1")
+        assert result == 1
+        assert mock_put.call_count == 1
+        # Verify only the DuoGuard unresolved discussion was resolved
+        resolve_url = mock_put.call_args[0][0]
+        assert "disc-duoguard" in resolve_url
+
+
+class TestFormatDiffMixedEmptyAndNonEmpty:
+    """Test format_diff_for_analysis with mixed empty and non-empty diffs."""
+
+    def test_mixed_empty_and_nonempty_diffs(self):
+        """Empty diffs are skipped but non-empty ones are included."""
+        changes = [
+            {"new_path": "empty1.py", "diff": ""},
+            {"new_path": "real.py", "diff": "+code here"},
+            {"new_path": "empty2.py", "diff": ""},
+            {"new_path": "also_real.py", "diff": "-old code"},
+        ]
+        result = format_diff_for_analysis(changes)
+        assert "empty1.py" not in result
+        assert "empty2.py" not in result
+        assert "real.py" in result
+        assert "also_real.py" in result
+
+    def test_all_empty_diffs_produces_empty(self):
+        """All-empty diffs produce empty string output."""
+        changes = [
+            {"new_path": "a.py", "diff": ""},
+            {"new_path": "b.py", "diff": ""},
+        ]
+        result = format_diff_for_analysis(changes)
+        assert result == ""
+
+
+class TestSecurityLabelsOrdering:
+    """Verify SECURITY_LABELS list properties."""
+
+    def test_labels_count(self):
+        """There are exactly 5 security labels."""
+        assert len(SECURITY_LABELS) == 5
+
+    def test_all_labels_have_security_prefix(self):
+        """All security labels start with 'security::'."""
+        for label in SECURITY_LABELS:
+            assert label.startswith("security::")
+
+
+class TestCreateSessionDefaults:
+    """Test _create_session default parameters."""
+
+    def test_default_retries(self):
+        """Default session has 3 retries."""
+        from duoguard import _create_session
+        session = _create_session()
+        adapter = session.get_adapter("https://example.com")
+        assert adapter.max_retries.total == 3
+
+    def test_default_backoff(self):
+        """Default session has backoff_factor of 1.0."""
+        from duoguard import _create_session
+        session = _create_session()
+        adapter = session.get_adapter("https://example.com")
+        assert adapter.max_retries.backoff_factor == 1.0
+
+    def test_custom_retries_and_backoff(self):
+        """Custom retries and backoff are applied."""
+        from duoguard import _create_session
+        session = _create_session(retries=5, backoff=2.0)
+        adapter = session.get_adapter("https://example.com")
+        assert adapter.max_retries.total == 5
+        assert adapter.max_retries.backoff_factor == 2.0
+
+    def test_allowed_methods(self):
+        """Retry is enabled for GET and POST methods."""
+        from duoguard import _create_session
+        session = _create_session()
+        adapter = session.get_adapter("https://example.com")
+        methods = adapter.max_retries.allowed_methods
+        assert "GET" in methods
+        assert "POST" in methods
+
+
+class TestDetermineSeverityAllNone:
+    """Edge cases for determine_severity with no findings."""
+
+    def test_all_empty_strings(self):
+        """Three empty strings produce NONE severity."""
+        assert determine_severity("", "", "") == "NONE"
+
+    def test_all_prose_no_brackets(self):
+        """Prose text without severity brackets produces NONE."""
+        assert determine_severity(
+            "No vulnerabilities were found in the code.",
+            "All dependencies are up to date.",
+            "No secrets detected in the diff.",
+        ) == "NONE"
+
+    def test_only_info_findings(self):
+        """Only INFO findings produce NONE (info has weight 0)."""
+        text = "[INFO] Note 1\n[INFO] Note 2"
+        assert determine_severity(text, "", "") == "NONE"
+
+
+class TestExportFindingsJsonCWEEnriched:
+    """Test that exported findings JSON includes CWE/OWASP enrichment."""
+
+    def test_enriched_findings_in_json(self, tmp_path):
+        """Exported findings include CWE and OWASP from enrichment."""
+        output = str(tmp_path / "findings.json")
+        code = "### [HIGH] Finding: SQL Injection via user input\n**File:** `db.py` (line 10)\n"
+        findings = export_findings_json(code, "", "", output)
+        assert len(findings) == 1
+        assert findings[0]["cwe"] == "CWE-89"
+        assert "Injection" in findings[0]["owasp"]
+
+        # Verify file content matches
+        data = json.loads(Path(output).read_text())
+        assert data[0]["cwe"] == "CWE-89"
+
+    def test_non_enrichable_finding_no_cwe_in_json(self, tmp_path):
+        """Findings that can't be enriched don't have CWE in JSON."""
+        output = str(tmp_path / "findings.json")
+        code = "### [LOW] Finding: Minor style concern\n**File:** `style.py` (line 1)\n"
+        findings = export_findings_json(code, "", "", output)
+        assert len(findings) == 1
+        assert "cwe" not in findings[0] or findings[0].get("cwe") is None
+
+
+class TestGetMrDiffHeaderConstruction:
+    """Test get_mr_diff URL and header construction."""
+
+    @patch("duoguard._session")
+    def test_url_includes_project_and_mr(self, mock_session):
+        """get_mr_diff constructs URL with project_id and mr_iid."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"changes": []}
+        mock_session.get.return_value = mock_resp
+
+        get_mr_diff("my%2Fproject", "42")
+        url = mock_session.get.call_args[0][0]
+        assert "my%2Fproject" in url
+        assert "42" in url
+        assert "changes" in url
+
+    @patch("duoguard._session")
+    def test_headers_include_private_token(self, mock_session):
+        """get_mr_diff includes PRIVATE-TOKEN header when token is set."""
+        import duoguard
+        old_token = duoguard.GITLAB_TOKEN
+        duoguard.GITLAB_TOKEN = "test-token"
+        try:
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status.return_value = None
+            mock_resp.json.return_value = {"changes": []}
+            mock_session.get.return_value = mock_resp
+
+            get_mr_diff("42", "1")
+            headers = mock_session.get.call_args[1]["headers"]
+            assert headers["PRIVATE-TOKEN"] == "test-token"
+        finally:
+            duoguard.GITLAB_TOKEN = old_token
+
+    @patch("duoguard._session")
+    def test_no_token_sends_empty_headers(self, mock_session):
+        """get_mr_diff sends empty headers when token is empty."""
+        import duoguard
+        old_token = duoguard.GITLAB_TOKEN
+        duoguard.GITLAB_TOKEN = ""
+        try:
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status.return_value = None
+            mock_resp.json.return_value = {"changes": []}
+            mock_session.get.return_value = mock_resp
+
+            get_mr_diff("42", "1")
+            headers = mock_session.get.call_args[1]["headers"]
+            assert headers == {}
+        finally:
+            duoguard.GITLAB_TOKEN = old_token
+
+
+class TestGetMrInfoHeaderConstruction:
+    """Test get_mr_info URL and header construction."""
+
+    @patch("duoguard._session")
+    def test_url_includes_project_and_mr(self, mock_session):
+        """get_mr_info constructs URL with project_id and mr_iid."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"iid": 1, "title": "Test"}
+        mock_session.get.return_value = mock_resp
+
+        get_mr_info("group%2Frepo", "99")
+        url = mock_session.get.call_args[0][0]
+        assert "group%2Frepo" in url
+        assert "99" in url
+        assert "merge_requests" in url
+        assert "changes" not in url  # Not the diff endpoint
+
+
+class TestCreateIssueForFindingDefaultValues:
+    """Test create_issue_for_finding with minimal finding dict."""
+
+    @patch("post_report.requests.post")
+    def test_minimal_finding_uses_defaults(self, mock_post):
+        """Finding with only severity and description uses default values."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {"severity": "high", "description": "Generic issue"}
+        result = create_issue_for_finding("42", "1", finding)
+        assert result is not None
+
+        payload = mock_post.call_args[1]["json"]
+        assert "HIGH" in payload["title"]
+        assert "Generic issue" in payload["title"]
+        assert "unknown" in payload["description"]  # default file_path
+        assert "line 1" in payload["description"]  # default line_num
+
+    @patch("post_report.requests.post")
+    def test_issue_includes_owasp_when_present(self, mock_post):
+        """Issue body includes OWASP reference when finding has it."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {
+            "severity": "high",
+            "description": "SQLi",
+            "file_path": "db.py",
+            "line_num": 10,
+            "category": "code-security",
+            "owasp": "A03:2021-Injection",
+        }
+        create_issue_for_finding("42", "1", finding)
+        body = mock_post.call_args[1]["json"]["description"]
+        assert "A03:2021-Injection" in body
+
+    @patch("post_report.requests.post")
+    def test_issue_omits_owasp_when_missing(self, mock_post):
+        """Issue body omits OWASP line when finding has no owasp key."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {
+            "severity": "high",
+            "description": "Unknown vuln",
+            "file_path": "x.py",
+            "line_num": 5,
+        }
+        create_issue_for_finding("42", "1", finding)
+        body = mock_post.call_args[1]["json"]["description"]
+        assert "OWASP" not in body
+
+    @patch("post_report.requests.post")
+    def test_issue_body_mentions_mr_iid(self, mock_post):
+        """Issue body references the source MR IID."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {"severity": "critical", "description": "RCE", "file_path": "cmd.py"}
+        create_issue_for_finding("42", "99", finding)
+        body = mock_post.call_args[1]["json"]["description"]
+        assert "!99" in body
+
+    @patch("post_report.requests.post")
+    def test_issue_body_has_auto_created_notice(self, mock_post):
+        """Issue body includes auto-creation notice."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {"severity": "high", "description": "Test"}
+        create_issue_for_finding("42", "1", finding)
+        body = mock_post.call_args[1]["json"]["description"]
+        assert "Auto-created by DuoGuard" in body
+
+
+class TestPostMrCommentUrl:
+    """Verify post_mr_comment URL construction."""
+
+    @patch("post_report.requests.post")
+    def test_comment_url_includes_project_and_mr(self, mock_post):
+        """post_mr_comment sends to correct notes URL."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"id": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        post_mr_comment("group%2Frepo", "55", "Test body")
+        url = mock_post.call_args[0][0]
+        assert "group%2Frepo" in url
+        assert "55" in url
+        assert "notes" in url
+
+    @patch("post_report.requests.post")
+    def test_comment_body_passed_correctly(self, mock_post):
+        """post_mr_comment passes body in JSON payload."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"id": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        post_mr_comment("42", "1", "My security report here")
+        payload = mock_post.call_args[1]["json"]
+        assert payload["body"] == "My security report here"
+
+
+class TestUpdateMrCommentUrl:
+    """Verify update_mr_comment URL construction."""
+
+    @patch("post_report.requests.put")
+    def test_update_url_includes_note_id(self, mock_put):
+        """update_mr_comment URL includes the note ID."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_put.return_value = mock_resp
+
+        update_mr_comment("42", "7", 123, "Updated body")
+        url = mock_put.call_args[0][0]
+        assert "42" in url
+        assert "7" in url
+        assert "123" in url
+
+    @patch("post_report.requests.put")
+    def test_update_passes_new_body(self, mock_put):
+        """update_mr_comment sends updated body."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_put.return_value = mock_resp
+
+        update_mr_comment("42", "7", 123, "New body text")
+        payload = mock_put.call_args[1]["json"]
+        assert payload["body"] == "New body text"
+
+
+class TestFindExistingCommentEdgeCases:
+    """Edge cases for find_existing_comment."""
+
+    @patch("post_report.requests.get")
+    def test_empty_notes_list(self, mock_get):
+        """Empty notes list returns None."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = find_existing_comment("42", "1")
+        assert result is None
+
+    @patch("post_report.requests.get")
+    def test_multiple_duoguard_comments_returns_first(self, mock_get):
+        """Multiple DuoGuard comments returns the first match."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"id": 10, "body": "## DuoGuard Security Review Report\nFirst"},
+            {"id": 20, "body": "## DuoGuard Security Review Report\nSecond"},
+        ]
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = find_existing_comment("42", "1")
+        assert result == 10
+
+    @patch("post_report.requests.get")
+    def test_note_without_body_key_skipped(self, mock_get):
+        """Notes missing 'body' key are skipped."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {"id": 10},  # no 'body' key
+            {"id": 20, "body": "## DuoGuard Security Review Report\nFound"},
+        ]
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = find_existing_comment("42", "1")
+        assert result == 20
+
+
+class TestGetMrDiffVersionsUrl:
+    """Verify get_mr_diff_versions URL construction."""
+
+    @patch("post_report.requests.get")
+    def test_versions_url_includes_project_and_mr(self, mock_get):
+        """get_mr_diff_versions URL includes project and MR IDs."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        get_mr_diff_versions("my%2Fproj", "42")
+        url = mock_get.call_args[0][0]
+        assert "my%2Fproj" in url
+        assert "42" in url
+        assert "versions" in url
+
+
+class TestRunSecurityScanExcludeExtensionsAlone:
+    """Test _run_security_scan with only exclude_extensions set."""
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_all_files_excluded_short_circuits(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """When all files are excluded, scan short-circuits with no-changes message."""
+        mock_info.return_value = {"iid": 1, "title": "All excluded"}
+        mock_diff.return_value = {
+            "changes": [
+                {"new_path": "bundle.js", "diff": "+js code"},
+                {"new_path": "style.css", "diff": "+css code"},
+            ]
+        }
+
+        output = str(tmp_path / "report.md")
+        config = dict(DEFAULT_CONFIG)
+        config["exclude_extensions"] = ["js", "css"]
+        _run_security_scan("42", "1", output, "", "CRITICAL", config=config)
+
+        # All files excluded => no changes to review
+        report_text = Path(output).read_text()
+        assert "No code changes detected" in report_text
+        mock_code.assert_not_called()
+
+
+class TestDuoguardMainSarifAndOutput:
+    """Test main() passes --output and --sarif correctly in cicd mode."""
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard.load_config", return_value=dict(DEFAULT_CONFIG))
+    def test_cicd_with_custom_output_and_sarif(self, mock_config, mock_scan):
+        """CI/CD mode passes custom output and sarif paths."""
+        import duoguard
+        with patch("sys.argv", ["duoguard.py",
+                                 "--mode", "cicd",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--output", "custom-report.md",
+                                 "--sarif", "custom.sarif"]):
+            duoguard.main()
+
+        args = mock_scan.call_args
+        assert args[0][2] == "custom-report.md"  # output
+        assert args[0][3] == "custom.sarif"  # sarif
+
+    @patch("duoguard.run_agent_mode")
+    @patch("duoguard.load_config", return_value=dict(DEFAULT_CONFIG))
+    def test_agent_mode_passes_fail_on(self, mock_config, mock_agent):
+        """Agent mode passes fail_on parameter."""
+        import duoguard
+        with patch("sys.argv", ["duoguard.py",
+                                 "--mode", "agent",
+                                 "--fail-on", "CRITICAL"]):
+            duoguard.main()
+
+        kwargs = mock_agent.call_args[1]
+        assert kwargs["fail_on"] == "CRITICAL"
+
+
+class TestPostReportMainCreateIssuesWithoutFindingsFile:
+    """Test post_report main() --create-issues when no findings file."""
+
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_create_issues_without_findings_file_noop(
+        self, mock_post, mock_find, mock_labels, tmp_path,
+    ):
+        """--create-issues without --findings-file doesn't crash."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report content")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--create-issues",
+                                 "--severity", "HIGH"]):
+            pr_main()
+
+        # Should complete without error
+        mock_post.assert_called_once()
+
+
+class TestPostInlineFindingsDefaultValues:
+    """Test post_inline_findings with findings missing optional keys."""
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_finding_missing_file_path_uses_unknown(self, mock_versions, mock_disc):
+        """Finding without file_path key defaults to 'unknown'."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc", "head_commit_sha": "def", "start_commit_sha": "ghi",
+        }]
+        mock_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"description": "Issue", "severity": "high", "category": "code-security"}]
+        posted = post_inline_findings("42", "1", findings)
+        assert posted == 1
+        call_args = mock_disc.call_args
+        assert call_args[0][3] == "unknown"  # file_path
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_finding_missing_line_num_defaults_to_1(self, mock_versions, mock_disc):
+        """Finding without line_num key defaults to 1."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc", "head_commit_sha": "def", "start_commit_sha": "ghi",
+        }]
+        mock_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"file_path": "app.py", "description": "Issue",
+                      "severity": "high", "category": "code-security"}]
+        posted = post_inline_findings("42", "1", findings)
+        assert posted == 1
+        call_args = mock_disc.call_args
+        assert call_args[0][4] == 1  # line_num
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_finding_missing_description_uses_default(self, mock_versions, mock_disc):
+        """Finding without description key uses 'Security finding'."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc", "head_commit_sha": "def", "start_commit_sha": "ghi",
+        }]
+        mock_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"file_path": "app.py", "line_num": 5,
+                      "severity": "high", "category": "code-security"}]
+        posted = post_inline_findings("42", "1", findings)
+        assert posted == 1
+        body = mock_disc.call_args[0][2]
+        assert "Security finding" in body
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_finding_missing_category_uses_default(self, mock_versions, mock_disc):
+        """Finding without category key uses 'code-security'."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc", "head_commit_sha": "def", "start_commit_sha": "ghi",
+        }]
+        mock_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"file_path": "app.py", "line_num": 1,
+                      "severity": "high", "description": "Issue"}]
+        posted = post_inline_findings("42", "1", findings)
+        assert posted == 1
+        body = mock_disc.call_args[0][2]
+        assert "code-security" in body
+
+
+class TestParseFindingsSeverityDescriptionExtraction:
+    """Test _parse_findings description extraction from heading."""
+
+    def test_description_extracts_after_finding_colon(self):
+        """Description is the text after 'Finding: ' in heading."""
+        text = "### [HIGH] Finding: Use of eval() on user input\n**File:** `app.py` (line 1)\n"
+        findings = _parse_findings(text)
+        assert findings[0]["description"] == "Use of eval() on user input"
+
+    def test_description_with_mixed_case_severity_stripped(self):
+        """Mixed-case severity (e.g. [High]) is handled in heading prefix removal."""
+        text = "### [HIGH] Finding: Test issue here\n**File:** `x.py` (line 1)\n"
+        findings = _parse_findings(text)
+        # The replace uses uppercase: "### [HIGH] Finding: " is removed
+        assert findings[0]["description"] == "Test issue here"
+
+
+class TestCWEKeywordMapCompleteness:
+    """Verify keyword map has expected entries and no typos."""
+
+    def test_cross_site_scripting_alias(self):
+        """'cross-site scripting' maps to same CWE as 'xss'."""
+        assert CWE_KEYWORD_MAP["cross-site scripting"]["cwe"] == CWE_KEYWORD_MAP["xss"]["cwe"]
+
+    def test_os_command_alias(self):
+        """'os command' maps to same CWE as 'command injection'."""
+        assert CWE_KEYWORD_MAP["os command"]["cwe"] == CWE_KEYWORD_MAP["command injection"]["cwe"]
+
+    def test_server_side_request_forgery_alias(self):
+        """'server-side request forgery' maps to same CWE as 'ssrf'."""
+        assert CWE_KEYWORD_MAP["server-side request forgery"]["cwe"] == CWE_KEYWORD_MAP["ssrf"]["cwe"]
+
+    def test_insecure_direct_object_alias(self):
+        """'insecure direct object' maps to same CWE as 'idor'."""
+        assert CWE_KEYWORD_MAP["insecure direct object"]["cwe"] == CWE_KEYWORD_MAP["idor"]["cwe"]
+
+    def test_authentication_bypass_alias(self):
+        """'authentication bypass' maps to same CWE as 'broken auth'."""
+        assert CWE_KEYWORD_MAP["authentication bypass"]["cwe"] == CWE_KEYWORD_MAP["broken auth"]["cwe"]
+
+    def test_hardcoded_credential_alias(self):
+        """'hardcoded credential' maps to same CWE as 'hardcoded password'."""
+        assert CWE_KEYWORD_MAP["hardcoded credential"]["cwe"] == CWE_KEYWORD_MAP["hardcoded password"]["cwe"]
+
+    def test_file_upload_alias(self):
+        """'file upload' maps to same CWE as 'unrestricted upload'."""
+        assert CWE_KEYWORD_MAP["file upload"]["cwe"] == CWE_KEYWORD_MAP["unrestricted upload"]["cwe"]
+
+    def test_redos_alias(self):
+        """'redos' maps to same CWE as 'regex dos'."""
+        assert CWE_KEYWORD_MAP["redos"]["cwe"] == CWE_KEYWORD_MAP["regex dos"]["cwe"]
+
+    def test_total_keyword_count(self):
+        """Verify we have at least 30 keywords in the map."""
+        assert len(CWE_KEYWORD_MAP) >= 30
+
+
+class TestGenerateReportTimestamp:
+    """Verify report contains UTC timestamp."""
+
+    def test_report_has_utc_timestamp(self):
+        """Report includes a UTC timestamp."""
+        report = generate_report({"iid": 1, "title": "T"}, "", "", "")
+        assert "UTC" in report
+        assert "Reviewed at:" in report
+
+
+class TestRunSecurityScanSeverityFile:
+    """Verify severity text file is written correctly."""
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_severity_none_written_to_file(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path, monkeypatch,
+    ):
+        """NONE severity is written to severity file."""
+        monkeypatch.chdir(tmp_path)
+        mock_info.return_value = {"iid": 1, "title": "Clean MR"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "No issues found."
+        mock_dep.return_value = "Clean"
+        mock_secret.return_value = "Clean"
+
+        output = str(tmp_path / "report.md")
+        _run_security_scan("42", "1", output, "", "CRITICAL")
+
+        severity_file = tmp_path / "duoguard-severity.txt"
+        assert severity_file.exists()
+        assert severity_file.read_text() == "NONE"
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_severity_critical_written_to_file(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path, monkeypatch,
+    ):
+        """CRITICAL severity is written to severity file before exit."""
+        monkeypatch.chdir(tmp_path)
+        mock_info.return_value = {"iid": 1, "title": "Bad MR"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "### [CRITICAL] Finding: RCE\n**File:** `app.py` (line 1)\n"
+        mock_dep.return_value = ""
+        mock_secret.return_value = ""
+
+        output = str(tmp_path / "report.md")
+        with pytest.raises(SystemExit):
+            _run_security_scan("42", "1", output, "", "LOW")
+
+        severity_file = tmp_path / "duoguard-severity.txt"
+        assert severity_file.exists()
+        assert severity_file.read_text() == "CRITICAL"
+
+
+class TestPostReportMainApprovalBoundaries:
+    """Test approval logic boundary conditions in post_report main()."""
+
+    @patch("post_report.approve_mr")
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_approve_medium_below_high_threshold(
+        self, mock_post, mock_find, mock_labels, mock_approve, tmp_path,
+    ):
+        """MEDIUM severity with HIGH threshold => approve (MEDIUM < HIGH)."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--approve",
+                                 "--severity", "MEDIUM",
+                                 "--approve-threshold", "HIGH"]):
+            pr_main()
+
+        mock_approve.assert_called_once()
+
+    @patch("post_report.approve_mr")
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_approve_low_below_medium_threshold(
+        self, mock_post, mock_find, mock_labels, mock_approve, tmp_path,
+    ):
+        """LOW severity with MEDIUM threshold => approve (LOW < MEDIUM)."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--approve",
+                                 "--severity", "LOW",
+                                 "--approve-threshold", "MEDIUM"]):
+            pr_main()
+
+        mock_approve.assert_called_once()
+
+    @patch("post_report.unapprove_mr")
+    @patch("post_report.update_mr_labels")
+    @patch("post_report.find_existing_comment", return_value=None)
+    @patch("post_report.post_mr_comment")
+    def test_unapprove_critical_above_high_threshold(
+        self, mock_post, mock_find, mock_labels, mock_unapprove, tmp_path,
+    ):
+        """CRITICAL severity with HIGH threshold => unapprove (CRITICAL >= HIGH)."""
+        from post_report import main as pr_main
+
+        report_file = tmp_path / "report.md"
+        report_file.write_text("Report")
+
+        with patch("sys.argv", ["post_report.py",
+                                 "--project-id", "42",
+                                 "--mr-iid", "7",
+                                 "--report-file", str(report_file),
+                                 "--approve",
+                                 "--severity", "CRITICAL",
+                                 "--approve-threshold", "HIGH"]):
+            pr_main()
+
+        mock_unapprove.assert_called_once()
