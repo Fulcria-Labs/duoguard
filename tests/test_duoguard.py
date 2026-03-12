@@ -7256,3 +7256,578 @@ class TestPostReportMainApprovalBoundaries:
             pr_main()
 
         mock_unapprove.assert_called_once()
+
+
+# ── Advanced tests added 2026-03-12 ──────────────────────────────────────────
+
+
+class TestFormatDiffTruncation:
+    """Verify diff truncation and size limit behavior."""
+
+    def test_truncation_notice_when_exceeding_limit(self):
+        """Truncation notice is appended when diff exceeds max_size."""
+        changes = [
+            {"new_path": f"file_{i}.py", "diff": "+" + "x" * 500}
+            for i in range(10)
+        ]
+        result = format_diff_for_analysis(changes, max_size=2000)
+        assert "omitted" in result
+        assert "limit" in result
+
+    def test_no_truncation_within_limit(self):
+        """No truncation notice when diff fits within limit."""
+        changes = [{"new_path": "small.py", "diff": "+hello"}]
+        result = format_diff_for_analysis(changes, max_size=200_000)
+        assert "omitted" not in result
+
+    def test_empty_changes_list(self):
+        """Empty changes list returns empty string."""
+        result = format_diff_for_analysis([])
+        assert result == ""
+
+    def test_diff_preserves_file_path(self):
+        """File paths are preserved in formatted output."""
+        changes = [{"new_path": "src/auth/login.py", "diff": "+pass"}]
+        result = format_diff_for_analysis(changes)
+        assert "src/auth/login.py" in result
+
+    def test_old_path_fallback(self):
+        """Falls back to old_path when new_path is missing."""
+        changes = [{"old_path": "deleted.py", "diff": "-removed"}]
+        result = format_diff_for_analysis(changes)
+        assert "deleted.py" in result
+
+
+class TestExtractDependencyFilesComprehensive:
+    """Test dependency file detection for all supported ecosystems."""
+
+    def test_detects_go_mod(self):
+        changes = [{"new_path": "go.mod", "diff": "+module"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_cargo_toml(self):
+        changes = [{"new_path": "Cargo.toml", "diff": "+[deps]"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_gemfile_lock(self):
+        changes = [{"new_path": "Gemfile.lock", "diff": "+rails"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_composer_json(self):
+        changes = [{"new_path": "composer.json", "diff": "+laravel"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_mix_exs(self):
+        changes = [{"new_path": "mix.exs", "diff": "+phoenix"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_pom_xml(self):
+        changes = [{"new_path": "pom.xml", "diff": "+spring"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_build_gradle(self):
+        changes = [{"new_path": "build.gradle", "diff": "+kotlin"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_build_gradle_kts(self):
+        changes = [{"new_path": "build.gradle.kts", "diff": "+kotlin"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_dockerfile(self):
+        changes = [{"new_path": "Dockerfile", "diff": "+FROM python"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_ignores_non_dependency_files(self):
+        changes = [{"new_path": "main.py", "diff": "+code"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 0
+
+    def test_detects_uv_lock(self):
+        changes = [{"new_path": "uv.lock", "diff": "+uv"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_pdm_lock(self):
+        changes = [{"new_path": "pdm.lock", "diff": "+pdm"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_pnpm_lock(self):
+        changes = [{"new_path": "pnpm-lock.yaml", "diff": "+pnpm"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_package_swift(self):
+        changes = [{"new_path": "Package.swift", "diff": "+swift"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_detects_packages_config(self):
+        changes = [{"new_path": "packages.config", "diff": "+nuget"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+
+class TestShouldExcludePathAdvanced:
+    """Advanced exclusion path tests."""
+
+    def test_nested_vendor_path(self):
+        assert should_exclude_path("vendor/lib/file.go", exclude_paths=["vendor/*"])
+
+    def test_nested_generated_file(self):
+        assert should_exclude_path("src/api.generated.ts", exclude_paths=["*.generated.*"])
+
+    def test_no_exclude_rules(self):
+        assert not should_exclude_path("src/main.py")
+
+    def test_exclude_map_extension(self):
+        assert should_exclude_path("bundle.js.map", exclude_extensions=["map"])
+
+    def test_non_matching_extension(self):
+        assert not should_exclude_path("app.py", exclude_extensions=["js"])
+
+
+class TestFilterExcludedChangesAdvanced:
+    """Test filter_excluded_changes with combinations."""
+
+    def test_filters_by_path_pattern(self):
+        changes = [
+            {"new_path": "vendor/lib.go", "diff": "+x"},
+            {"new_path": "src/main.go", "diff": "+y"},
+        ]
+        result = filter_excluded_changes(changes, exclude_paths=["vendor/*"])
+        assert len(result) == 1
+        assert result[0]["new_path"] == "src/main.go"
+
+    def test_no_exclusions_returns_all(self):
+        changes = [{"new_path": "a.py", "diff": "+x"}]
+        result = filter_excluded_changes(changes)
+        assert len(result) == 1
+
+    def test_both_path_and_extension_filters(self):
+        changes = [
+            {"new_path": "vendor/lib.go", "diff": "+x"},
+            {"new_path": "bundle.map", "diff": "+y"},
+            {"new_path": "src/main.py", "diff": "+z"},
+        ]
+        result = filter_excluded_changes(changes, exclude_paths=["vendor/*"], exclude_extensions=["map"])
+        assert len(result) == 1
+        assert result[0]["new_path"] == "src/main.py"
+
+
+class TestParseGatewayHeadersAdvanced:
+    """Test gateway header parsing edge cases."""
+
+    def test_json_object_parsing(self):
+        raw = '{"X-Custom": "value", "Auth": "token"}'
+        result = _parse_gateway_headers(raw)
+        assert result["X-Custom"] == "value"
+        assert result["Auth"] == "token"
+
+    def test_newline_separated_parsing(self):
+        raw = "X-Custom: value\nAuth: token123"
+        result = _parse_gateway_headers(raw)
+        assert result["X-Custom"] == "value"
+        assert result["Auth"] == "token123"
+
+    def test_empty_string_returns_empty_dict(self):
+        assert _parse_gateway_headers("") == {}
+
+    def test_invalid_json_falls_back_to_newline(self):
+        raw = "not-json\nKey: Value"
+        result = _parse_gateway_headers(raw)
+        assert result.get("Key") == "Value"
+
+    def test_json_array_falls_back_to_newline(self):
+        raw = '["not", "a", "dict"]'
+        result = _parse_gateway_headers(raw)
+        assert isinstance(result, dict)
+
+
+class TestCountBySeverityPatterns:
+    """Test _count_by_severity pattern matching edge cases."""
+
+    def test_counts_heading_format(self):
+        text = "### [CRITICAL] Finding: RCE\n### [HIGH] Finding: XSS\n"
+        counts = _count_by_severity(text)
+        assert counts["critical"] == 1
+        assert counts["high"] == 1
+
+    def test_counts_dash_prefix_format(self):
+        text = "- [HIGH] SQL injection in query\n- [MEDIUM] Missing CSRF\n"
+        counts = _count_by_severity(text)
+        assert counts["high"] == 1
+        assert counts["medium"] == 1
+
+    def test_empty_string_returns_zeros(self):
+        counts = _count_by_severity("")
+        assert all(v == 0 for v in counts.values())
+
+    def test_counts_info_severity(self):
+        text = "### [INFO] Informational finding\n"
+        counts = _count_by_severity(text)
+        assert counts["info"] == 1
+
+
+class TestDetermineSeverityWeighting:
+    """Test severity determination with weighted scoring."""
+
+    def test_single_critical_returns_critical(self):
+        text = "### [CRITICAL] Finding: RCE\n**File:** `a.py` (line 1)\n"
+        assert determine_severity(text, "", "") == "CRITICAL"
+
+    def test_single_high_returns_high(self):
+        text = "### [HIGH] Finding: XSS\n**File:** `a.py` (line 1)\n"
+        assert determine_severity(text, "", "") == "HIGH"
+
+    def test_no_findings_returns_none(self):
+        assert determine_severity("Clean code", "No issues", "No secrets") == "NONE"
+
+    def test_single_low_returns_low(self):
+        text = "### [LOW] Finding: Minor\n**File:** `a.py` (line 1)\n"
+        assert determine_severity(text, "", "") == "LOW"
+
+    def test_mixed_findings_uses_highest(self):
+        code = "### [HIGH] Finding: Auth\n**File:** `a.py` (line 1)\n"
+        dep = "### [LOW] Finding: Minor\n**File:** `b.py` (line 1)\n"
+        result = determine_severity(code, dep, "")
+        assert result == "HIGH"
+
+
+class TestCountFindings:
+    """Test count_findings summary function."""
+
+    def test_counts_mixed_severities(self):
+        text = "### [HIGH] A\n**File:** `x.py` (line 1)\n### [LOW] B\n**File:** `y.py` (line 1)\n"
+        assert count_findings(text) == 2
+
+    def test_zero_findings(self):
+        assert count_findings("No issues found") == 0
+
+
+class TestParseFindingsAdvanced:
+    """Test _parse_findings with complex inputs."""
+
+    def test_multiple_findings_parsed(self):
+        text = (
+            "### [HIGH] Finding: SQL Injection\n**File:** `db.py` (line 42)\n"
+            "### [MEDIUM] Finding: Missing CSRF\n**File:** `views.py` (line 10)\n"
+        )
+        findings = _parse_findings(text)
+        assert len(findings) == 2
+        assert findings[0]["severity"] == "high"
+        assert findings[0]["file_path"] == "db.py"
+        assert findings[0]["line_num"] == 42
+
+    def test_finding_with_cwe_enrichment(self):
+        text = "### [HIGH] Finding: SQL injection in query\n**File:** `db.py` (line 1)\n"
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        assert findings[0].get("cwe") == "CWE-89"
+
+    def test_category_passed_through(self):
+        text = "### [HIGH] Finding: Issue\n**File:** `x.py` (line 1)\n"
+        findings = _parse_findings(text, "secret-scan")
+        assert findings[0]["category"] == "secret-scan"
+
+    def test_no_findings_in_clean_text(self):
+        findings = _parse_findings("No security issues found.")
+        assert len(findings) == 0
+
+
+class TestGenerateCodequalityReportAdvanced:
+    """Test code quality report generation."""
+
+    def test_generates_valid_json(self, tmp_path):
+        code = "### [HIGH] Finding: XSS\n**File:** `app.js` (line 5)\n"
+        output = str(tmp_path / "cq.json")
+        generate_codequality_report(code, output)
+        data = json.loads(Path(output).read_text())
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["type"] == "issue"
+
+    def test_severity_mapping(self, tmp_path):
+        code = "### [CRITICAL] Finding: RCE\n**File:** `x.py` (line 1)\n"
+        output = str(tmp_path / "cq.json")
+        generate_codequality_report(code, output)
+        data = json.loads(Path(output).read_text())
+        assert data[0]["severity"] == "blocker"
+
+    def test_fingerprint_deterministic(self, tmp_path):
+        code = "### [HIGH] Finding: Test\n**File:** `x.py` (line 1)\n"
+        out1 = str(tmp_path / "cq1.json")
+        out2 = str(tmp_path / "cq2.json")
+        generate_codequality_report(code, out1)
+        generate_codequality_report(code, out2)
+        d1 = json.loads(Path(out1).read_text())
+        d2 = json.loads(Path(out2).read_text())
+        assert d1[0]["fingerprint"] == d2[0]["fingerprint"]
+
+    def test_includes_all_categories(self, tmp_path):
+        code = "### [HIGH] Finding: Code\n**File:** `a.py` (line 1)\n"
+        dep = "### [MEDIUM] Finding: Dep\n**File:** `req.txt` (line 1)\n"
+        secret = "### [LOW] Finding: Secret\n**File:** `env` (line 1)\n"
+        output = str(tmp_path / "cq.json")
+        generate_codequality_report(code, output, dep, secret)
+        data = json.loads(Path(output).read_text())
+        assert len(data) == 3
+
+
+class TestGenerateSarifReportAdvanced:
+    """Test SARIF report generation."""
+
+    def test_valid_sarif_structure(self, tmp_path):
+        code = "### [HIGH] Finding: XSS\n**File:** `app.js` (line 5)\n"
+        output = str(tmp_path / "sarif.json")
+        generate_sarif_report(code, output)
+        data = json.loads(Path(output).read_text())
+        assert data["version"] == "2.1.0"
+        assert data["runs"][0]["tool"]["driver"]["name"] == "DuoGuard"
+
+    def test_sarif_invocations(self, tmp_path):
+        code = "### [HIGH] Finding: Issue\n**File:** `x.py` (line 1)\n"
+        output = str(tmp_path / "sarif.json")
+        generate_sarif_report(code, output)
+        data = json.loads(Path(output).read_text())
+        assert data["runs"][0]["invocations"][0]["executionSuccessful"] is True
+
+    def test_sarif_partial_fingerprints(self, tmp_path):
+        code = "### [HIGH] Finding: Test\n**File:** `x.py` (line 1)\n"
+        output = str(tmp_path / "sarif.json")
+        generate_sarif_report(code, output)
+        data = json.loads(Path(output).read_text())
+        result = data["runs"][0]["results"][0]
+        assert "duoguardFindingHash/v1" in result["partialFingerprints"]
+
+    def test_sarif_cwe_in_rules(self, tmp_path):
+        code = "### [HIGH] Finding: SQL injection\n**File:** `db.py` (line 1)\n"
+        output = str(tmp_path / "sarif.json")
+        generate_sarif_report(code, output)
+        data = json.loads(Path(output).read_text())
+        rules = data["runs"][0]["tool"]["driver"]["rules"]
+        assert any(r.get("properties", {}).get("cwe") for r in rules)
+
+
+class TestExportFindingsJsonAdvanced:
+    """Test export_findings_json output."""
+
+    def test_exports_all_categories(self, tmp_path):
+        code = "### [HIGH] Finding: Code\n**File:** `a.py` (line 1)\n"
+        dep = "### [MEDIUM] Finding: Dep\n**File:** `b.txt` (line 1)\n"
+        secret = "### [LOW] Finding: Sec\n**File:** `c.env` (line 1)\n"
+        output = str(tmp_path / "findings.json")
+        result = export_findings_json(code, dep, secret, output)
+        assert len(result) == 3
+        categories = {f["category"] for f in result}
+        assert categories == {"code-security", "dependency-audit", "secret-scan"}
+
+
+class TestComputeDiffComplexityAdvanced:
+    """Test diff complexity scoring."""
+
+    def test_empty_changes_zero_score(self):
+        result = compute_diff_complexity([])
+        assert result["complexity_score"] == 0
+
+    def test_security_patterns_detected(self):
+        changes = [{"new_path": "auth.py", "diff": "+password = get_password()"}]
+        result = compute_diff_complexity(changes)
+        assert "auth.py" in result["high_risk_files"]
+
+    def test_score_capped_at_100(self):
+        changes = [
+            {"new_path": f"f{i}.py", "diff": "+password\n" * 100}
+            for i in range(20)
+        ]
+        result = compute_diff_complexity(changes)
+        assert result["complexity_score"] <= 100
+
+    def test_non_security_files_not_flagged(self):
+        changes = [{"new_path": "readme.md", "diff": "+# Hello\n"}]
+        result = compute_diff_complexity(changes)
+        assert len(result["high_risk_files"]) == 0
+
+
+class TestEnrichFindingCweAdvanced:
+    """Test CWE enrichment edge cases."""
+
+    def test_preserves_existing_cwe(self):
+        finding = {"description": "sql injection", "cwe": "CWE-999", "owasp": "A99"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-999"
+
+    def test_enriches_xss(self):
+        finding = {"description": "Cross-site scripting vulnerability"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-79"
+
+    def test_enriches_ssrf(self):
+        finding = {"description": "Server-side request forgery detected"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-918"
+
+    def test_enriches_prototype_pollution(self):
+        finding = {"description": "Prototype pollution via merge"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-1321"
+
+
+class TestGenerateReportAdvanced:
+    """Test report generation with various inputs."""
+
+    def test_report_includes_mr_iid(self):
+        report = generate_report({"iid": 42, "title": "Fix auth"}, "", "", "")
+        assert "!42" in report
+
+    def test_report_includes_scan_metrics(self):
+        report = generate_report(
+            {"iid": 1, "title": "T"}, "", "", "",
+            scan_duration=5.3, files_scanned=10,
+        )
+        assert "5.3s" in report
+        assert "Scan Metrics" in report
+
+    def test_report_includes_complexity(self):
+        complexity = {
+            "complexity_score": 45,
+            "total_additions": 100,
+            "total_deletions": 50,
+            "total_files": 5,
+            "high_risk_files": ["auth.py"],
+            "risk_factors": ["auth logic modified"],
+        }
+        report = generate_report(
+            {"iid": 1, "title": "T"}, "", "", "",
+            complexity=complexity,
+        )
+        assert "45/100" in report
+
+    def test_report_summary_table(self):
+        report = generate_report({"iid": 1, "title": "T"}, "", "", "")
+        assert "Code Security" in report
+        assert "Dependencies" in report
+        assert "Secrets" in report
+
+
+class TestLoadConfigAdvanced:
+    """Test configuration loading edge cases."""
+
+    def test_returns_defaults(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config = load_config()
+        assert config["severity_threshold"] == "HIGH"
+
+    def test_deep_merges_agents(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".duoguard.yml").write_text("agents:\n  secret_scan: false\n")
+        config = load_config()
+        assert config["agents"]["secret_scan"] is False
+        assert config["agents"]["code_security"] is True
+
+
+class TestGetMrDiffErrors:
+    """Test get_mr_diff error handling."""
+
+    @patch("duoguard._session")
+    def test_raises_on_404(self, mock_session):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_resp)
+        mock_session.get.return_value = mock_resp
+        with pytest.raises(requests.exceptions.HTTPError):
+            get_mr_diff("42", "1")
+
+    @patch("duoguard._session")
+    def test_raises_on_timeout(self, mock_session):
+        mock_session.get.side_effect = requests.exceptions.Timeout()
+        with pytest.raises(requests.exceptions.Timeout):
+            get_mr_diff("42", "1")
+
+
+class TestPostReportFunctions:
+    """Test post_report.py helper functions."""
+
+    @patch("post_report.requests.post")
+    def test_approve_mr_returns_true(self, mock_post):
+        mock_resp = MagicMock()
+        mock_post.return_value = mock_resp
+        assert approve_mr("42", "1") is True
+
+    @patch("post_report.requests.post")
+    def test_approve_mr_returns_false_on_error(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_resp)
+        mock_post.return_value = mock_resp
+        assert approve_mr("42", "1") is False
+
+    @patch("post_report.requests.post")
+    def test_unapprove_mr_returns_true(self, mock_post):
+        mock_resp = MagicMock()
+        mock_post.return_value = mock_resp
+        assert unapprove_mr("42", "1") is True
+
+    @patch("post_report.requests.post")
+    def test_unapprove_mr_returns_false_on_error(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_resp)
+        mock_post.return_value = mock_resp
+        assert unapprove_mr("42", "1") is False
+
+
+class TestCreateIssuesForFindingsBatch:
+    """Test batch issue creation with severity filtering."""
+
+    @patch("post_report.create_issue_for_finding")
+    def test_filters_by_min_severity(self, mock_create):
+        mock_create.return_value = {"iid": 1}
+        findings = [
+            {"severity": "low", "description": "Low"},
+            {"severity": "high", "description": "High"},
+            {"severity": "critical", "description": "Critical"},
+        ]
+        created = create_issues_for_findings("42", "1", findings, min_severity="high")
+        assert len(created) == 2
+
+    @patch("post_report.create_issue_for_finding")
+    def test_empty_findings(self, mock_create):
+        created = create_issues_for_findings("42", "1", [])
+        assert len(created) == 0
+
+
+class TestSecurityLabelsConstant:
+    """Test SECURITY_LABELS constant."""
+
+    def test_has_five_labels(self):
+        assert len(SECURITY_LABELS) == 5
+        assert "security::critical" in SECURITY_LABELS
+        assert "security::clean" in SECURITY_LABELS
+
+
+class TestUpdateMrLabelsAdvanced:
+    """Test MR label updates."""
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_replaces_old_security_label(self, mock_get, mock_put):
+        mock_get_resp = MagicMock()
+        mock_get_resp.json.return_value = {"labels": ["security::low", "feature"]}
+        mock_get.return_value = mock_get_resp
+        mock_put_resp = MagicMock()
+        mock_put.return_value = mock_put_resp
+        result = update_mr_labels("42", "1", "HIGH")
+        assert result is True
+        payload = mock_put.call_args[1]["json"]
+        assert "security::high" in payload["labels"]
+        assert "security::low" not in payload["labels"]
