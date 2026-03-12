@@ -243,7 +243,7 @@ duoguard/
 │   └── post_report.py                        # MR comments, inline discussions, approval
 ├── docs/
 │   └── external-agent-config.yml             # Config to paste in GitLab UI
-├── tests/                                    # 335 tests
+├── tests/                                    # 2035 tests (8 files, 6 suites)
 ├── .gitlab-ci.yml                            # CI/CD pipeline
 ├── .duoguard.yml                             # Project configuration (optional)
 ├── AGENTS.md                                 # Agent customization
@@ -256,7 +256,7 @@ duoguard/
 ## Testing
 
 ```bash
-# Run all 335 tests
+# Run all 2035 tests (8 test files, 6 suites)
 python -m pytest tests/ -v
 
 # Tests cover: diff formatting, dependency extraction, severity scoring,
@@ -264,13 +264,14 @@ python -m pytest tests/ -v
 # AI Gateway calls, Anthropic proxy, MR comment posting, inline discussions,
 # discussion deduplication, MR labels, scan metrics,
 # MR approval/unapproval, config loading, path exclusions, findings export,
-# CWE/OWASP enrichment, diff complexity analysis, GitLab issue creation
+# CWE/OWASP enrichment, diff complexity analysis, GitLab issue creation,
+# integration tests, parametric tests, stress tests, advanced scenarios
 ```
 
 ## Prize Categories
 
 - **Anthropic + GitLab Grand Prize** — Deep Claude integration: semantic security analysis, multi-agent orchestration, AI Gateway managed credentials
-- **Most Technically Impressive** — Flow Registry v1 flow, parallel multi-agent execution, dual-mode (CI/CD + agent trigger), SARIF + Code Quality + inline discussions + MR labels + MR approval + discussion deduplication + CWE/OWASP enrichment + diff complexity analysis + GitLab issue creation + scan metrics, 335 tests
+- **Most Technically Impressive** — Flow Registry v1 flow, parallel multi-agent execution, dual-mode (CI/CD + agent trigger), SARIF + Code Quality + inline discussions + MR labels + MR approval + discussion deduplication + CWE/OWASP enrichment + diff complexity analysis + GitLab issue creation + scan metrics, 2035 tests
 - **Most Impactful** — Security automation that benefits every development team, zero-config with `injectGatewayToken`, configurable via `.duoguard.yml`, OWASP Top 10 coverage
 
 ## License

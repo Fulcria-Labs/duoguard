@@ -18,6 +18,7 @@ duoguard-security-scan:
   script:
     - echo "Running DuoGuard Security Review..."
     - python scripts/duoguard.py
+      --mode cicd
       --project-id "$CI_PROJECT_ID"
       --mr-iid "$CI_MERGE_REQUEST_IID"
       --output "$DUOGUARD_REPORT_FILE"
