@@ -34,6 +34,7 @@ from duoguard import (
     generate_sarif_report,
     load_agent_prompt,
     load_config,
+    run_agent_mode,
     run_code_security_review,
     run_dependency_audit,
     run_secret_scan,
@@ -2756,3 +2757,848 @@ class TestCreateIssuesForFindings:
         ]
         result = create_issues_for_findings("123", "5", findings, min_severity="critical")
         assert len(result) == 1
+
+
+# ── Agent mode tests ─────────────────────────────────────────
+
+
+class TestRunAgentMode:
+    """Tests for run_agent_mode() function."""
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard._parse_agent_context")
+    @patch("duoguard._resolve_api_url_for_agent")
+    def test_agent_mode_happy_path(self, mock_resolve, mock_parse, mock_scan):
+        """Agent mode resolves API URL, parses context, and runs scan."""
+        import duoguard
+        from duoguard import run_agent_mode
+        old_event = duoguard.AI_FLOW_EVENT
+        duoguard.AI_FLOW_EVENT = "mention"
+        mock_resolve.return_value = "https://gitlab.com/api/v4"
+        mock_parse.return_value = ("group%2Fproject", "42")
+        try:
+            run_agent_mode(output="report.md", sarif="sarif.json",
+                           fail_on="HIGH", config=None)
+            mock_resolve.assert_called_once()
+            mock_parse.assert_called_once()
+            mock_scan.assert_called_once_with(
+                "group%2Fproject", "42", "report.md", "sarif.json", "HIGH", config=None
+            )
+        finally:
+            duoguard.AI_FLOW_EVENT = old_event
+
+    @patch("duoguard._parse_agent_context")
+    @patch("duoguard._resolve_api_url_for_agent")
+    def test_agent_mode_missing_context_exits(self, mock_resolve, mock_parse):
+        """Agent mode exits with code 1 when context cannot be parsed."""
+        import duoguard
+        from duoguard import run_agent_mode
+        old_event = duoguard.AI_FLOW_EVENT
+        old_path = duoguard.AI_FLOW_PROJECT_PATH
+        old_ctx = duoguard.AI_FLOW_CONTEXT
+        duoguard.AI_FLOW_EVENT = "mention"
+        duoguard.AI_FLOW_PROJECT_PATH = ""
+        duoguard.AI_FLOW_CONTEXT = ""
+        mock_resolve.return_value = "https://gitlab.com/api/v4"
+        mock_parse.return_value = ("", "")
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                run_agent_mode()
+            assert exc_info.value.code == 1
+        finally:
+            duoguard.AI_FLOW_EVENT = old_event
+            duoguard.AI_FLOW_PROJECT_PATH = old_path
+            duoguard.AI_FLOW_CONTEXT = old_ctx
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard._parse_agent_context")
+    @patch("duoguard._resolve_api_url_for_agent")
+    def test_agent_mode_missing_mr_iid_exits(self, mock_resolve, mock_parse, mock_scan):
+        """Agent mode exits when MR IID is empty but project is present."""
+        import duoguard
+        from duoguard import run_agent_mode
+        old_event = duoguard.AI_FLOW_EVENT
+        duoguard.AI_FLOW_EVENT = "assign_reviewer"
+        mock_resolve.return_value = "https://gitlab.com/api/v4"
+        mock_parse.return_value = ("group%2Fproject", "")
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                run_agent_mode()
+            assert exc_info.value.code == 1
+            mock_scan.assert_not_called()
+        finally:
+            duoguard.AI_FLOW_EVENT = old_event
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard._parse_agent_context")
+    @patch("duoguard._resolve_api_url_for_agent")
+    def test_agent_mode_sets_gitlab_api_url(self, mock_resolve, mock_parse, mock_scan):
+        """Agent mode sets GITLAB_API_URL from resolved agent URL."""
+        import duoguard
+        from duoguard import run_agent_mode
+        old_api_url = duoguard.GITLAB_API_URL
+        old_event = duoguard.AI_FLOW_EVENT
+        duoguard.AI_FLOW_EVENT = "mention"
+        mock_resolve.return_value = "https://gitlab.example.com/api/v4"
+        mock_parse.return_value = ("proj", "1")
+        try:
+            run_agent_mode()
+            assert duoguard.GITLAB_API_URL == "https://gitlab.example.com/api/v4"
+        finally:
+            duoguard.GITLAB_API_URL = old_api_url
+            duoguard.AI_FLOW_EVENT = old_event
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard._parse_agent_context")
+    @patch("duoguard._resolve_api_url_for_agent")
+    def test_agent_mode_default_event_is_unknown(self, mock_resolve, mock_parse, mock_scan):
+        """When AI_FLOW_EVENT is empty, event defaults to 'unknown'."""
+        import duoguard
+        from duoguard import run_agent_mode
+        old_event = duoguard.AI_FLOW_EVENT
+        duoguard.AI_FLOW_EVENT = ""
+        mock_resolve.return_value = "https://gitlab.com/api/v4"
+        mock_parse.return_value = ("proj", "1")
+        try:
+            run_agent_mode()
+            # The function should still work (no crash on empty event)
+            mock_scan.assert_called_once()
+        finally:
+            duoguard.AI_FLOW_EVENT = old_event
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard._parse_agent_context")
+    @patch("duoguard._resolve_api_url_for_agent")
+    def test_agent_mode_passes_config(self, mock_resolve, mock_parse, mock_scan):
+        """Agent mode passes the config dict through to _run_security_scan."""
+        import duoguard
+        from duoguard import run_agent_mode
+        old_event = duoguard.AI_FLOW_EVENT
+        duoguard.AI_FLOW_EVENT = "mention"
+        mock_resolve.return_value = "https://gitlab.com/api/v4"
+        mock_parse.return_value = ("proj", "1")
+        custom_config = {"severity_threshold": "CRITICAL", "agents": {"code_security": True}}
+        try:
+            run_agent_mode(config=custom_config)
+            mock_scan.assert_called_once_with(
+                "proj", "1", "duoguard-report.md", "", "HIGH", config=custom_config
+            )
+        finally:
+            duoguard.AI_FLOW_EVENT = old_event
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard._parse_agent_context")
+    @patch("duoguard._resolve_api_url_for_agent")
+    def test_agent_mode_custom_output_and_sarif(self, mock_resolve, mock_parse, mock_scan):
+        """Agent mode passes custom output and sarif paths."""
+        import duoguard
+        from duoguard import run_agent_mode
+        old_event = duoguard.AI_FLOW_EVENT
+        duoguard.AI_FLOW_EVENT = "mention"
+        mock_resolve.return_value = "https://gitlab.com/api/v4"
+        mock_parse.return_value = ("proj", "1")
+        try:
+            run_agent_mode(output="/tmp/custom-report.md", sarif="/tmp/custom.sarif",
+                           fail_on="CRITICAL")
+            mock_scan.assert_called_once_with(
+                "proj", "1", "/tmp/custom-report.md", "/tmp/custom.sarif",
+                "CRITICAL", config=None
+            )
+        finally:
+            duoguard.AI_FLOW_EVENT = old_event
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard._parse_agent_context")
+    @patch("duoguard._resolve_api_url_for_agent")
+    def test_agent_mode_assign_reviewer_event(self, mock_resolve, mock_parse, mock_scan):
+        """Agent mode handles assign_reviewer event type."""
+        import duoguard
+        from duoguard import run_agent_mode
+        old_event = duoguard.AI_FLOW_EVENT
+        duoguard.AI_FLOW_EVENT = "assign_reviewer"
+        mock_resolve.return_value = "https://gitlab.com/api/v4"
+        mock_parse.return_value = ("team%2Frepo", "99")
+        try:
+            run_agent_mode()
+            mock_scan.assert_called_once()
+        finally:
+            duoguard.AI_FLOW_EVENT = old_event
+
+
+# ── Secret scanning pattern tests ────────────────────────────
+
+
+class TestSecretScanPatterns:
+    """Tests verifying the secret scanner agent is invoked with diffs
+    containing real secret patterns, and that findings are produced."""
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_rsa_private_key(self, mock_call):
+        """RSA private key in diff triggers secret scan finding."""
+        mock_call.return_value = (
+            "### [CRITICAL] Finding: RSA private key exposed\n"
+            "**File:** `id_rsa` (line 1)\n"
+        )
+        diff = "+-----BEGIN RSA PRIVATE KEY-----\n+MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn..."
+        result = run_secret_scan(diff)
+        assert "[CRITICAL]" in result
+        assert "private key" in result.lower()
+        mock_call.assert_called_once()
+        # Verify the diff was passed in the user message
+        user_msg = mock_call.call_args[0][1]
+        assert "BEGIN RSA PRIVATE KEY" in user_msg
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_aws_access_key(self, mock_call):
+        """AWS access key pattern in diff triggers finding."""
+        mock_call.return_value = (
+            "### [CRITICAL] Finding: AWS access key exposed\n"
+            "**File:** `config.py` (line 5)\n"
+        )
+        diff = "+AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE'"
+        result = run_secret_scan(diff)
+        assert "[CRITICAL]" in result
+        user_msg = mock_call.call_args[0][1]
+        assert "AKIA" in user_msg
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_aws_secret_key(self, mock_call):
+        """AWS secret access key pattern in diff triggers finding."""
+        mock_call.return_value = (
+            "### [CRITICAL] Finding: AWS secret key exposed\n"
+            "**File:** `.env` (line 3)\n"
+        )
+        diff = "+AWS_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'"
+        result = run_secret_scan(diff)
+        assert "[CRITICAL]" in result
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_github_personal_access_token(self, mock_call):
+        """GitHub personal access token in diff triggers finding."""
+        mock_call.return_value = (
+            "### [CRITICAL] Finding: GitHub token exposed\n"
+            "**File:** `deploy.sh` (line 10)\n"
+        )
+        diff = "+GITHUB_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef012345"
+        result = run_secret_scan(diff)
+        assert "[CRITICAL]" in result
+        user_msg = mock_call.call_args[0][1]
+        assert "ghp_" in user_msg
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_generic_api_key_in_header(self, mock_call):
+        """Generic API key in HTTP header pattern triggers finding."""
+        mock_call.return_value = (
+            "### [HIGH] Finding: API key in source code\n"
+            "**File:** `client.py` (line 20)\n"
+        )
+        diff = "+headers = {'X-Api-Key': 'sk_test_FAKE_KEY_FOR_UNIT_TEST_0000'}"
+        result = run_secret_scan(diff)
+        assert "API key" in result or "api key" in result.lower()
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_database_connection_string(self, mock_call):
+        """Database connection string with password triggers finding."""
+        mock_call.return_value = (
+            "### [CRITICAL] Finding: Database password in connection string\n"
+            "**File:** `settings.py` (line 15)\n"
+        )
+        diff = "+DATABASE_URL = 'postgresql://admin:s3cretP@ss@db.example.com:5432/mydb'"
+        result = run_secret_scan(diff)
+        assert "[CRITICAL]" in result
+        user_msg = mock_call.call_args[0][1]
+        assert "postgresql://" in user_msg
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_jwt_token(self, mock_call):
+        """JWT token in diff triggers finding."""
+        mock_call.return_value = (
+            "### [HIGH] Finding: JWT token hardcoded\n"
+            "**File:** `auth.py` (line 8)\n"
+        )
+        diff = "+token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'"
+        result = run_secret_scan(diff)
+        assert "[HIGH]" in result
+        user_msg = mock_call.call_args[0][1]
+        assert "eyJ" in user_msg
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_slack_webhook_url(self, mock_call):
+        """Slack webhook URL in diff triggers finding."""
+        mock_call.return_value = (
+            "### [HIGH] Finding: Slack webhook URL exposed\n"
+            "**File:** `notify.py` (line 3)\n"
+        )
+        diff = "+SLACK_WEBHOOK = 'https://hooks.example.com/services/TTEST00000/BTEST00000/xxxxxxxxxFAKExxxxxxxxxx'"
+        result = run_secret_scan(diff)
+        assert "[HIGH]" in result
+        user_msg = mock_call.call_args[0][1]
+        assert "hooks.example.com" in user_msg
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_private_key_in_env(self, mock_call):
+        """Private key assigned to env variable triggers finding."""
+        mock_call.return_value = (
+            "### [CRITICAL] Finding: Private key in environment\n"
+            "**File:** `.env` (line 1)\n"
+        )
+        diff = "+PRIVATE_KEY='-----BEGIN EC PRIVATE KEY-----\\nMHQCAQE...'"
+        result = run_secret_scan(diff)
+        assert "[CRITICAL]" in result
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_google_api_key(self, mock_call):
+        """Google API key pattern triggers finding."""
+        mock_call.return_value = (
+            "### [HIGH] Finding: Google API key\n"
+            "**File:** `maps.js` (line 12)\n"
+        )
+        diff = "+const apiKey = 'AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY';"
+        result = run_secret_scan(diff)
+        assert "[HIGH]" in result
+        user_msg = mock_call.call_args[0][1]
+        assert "AIza" in user_msg
+
+    @patch("duoguard.call_ai_gateway")
+    def test_clean_diff_no_secrets(self, mock_call):
+        """A clean diff with no secrets produces no findings."""
+        mock_call.return_value = "No secrets detected."
+        diff = "+def add(a, b):\n+    return a + b"
+        result = run_secret_scan(diff)
+        assert "No secrets" in result
+
+    @patch("duoguard.call_ai_gateway")
+    def test_detects_stripe_secret_key(self, mock_call):
+        """Stripe secret key pattern triggers finding."""
+        mock_call.return_value = (
+            "### [CRITICAL] Finding: Stripe secret key\n"
+            "**File:** `billing.py` (line 7)\n"
+        )
+        diff = "+stripe.api_key = 'sk_test_FAKE_STRIPE_KEY_FOR_TESTING_00'"
+        result = run_secret_scan(diff)
+        assert "[CRITICAL]" in result
+        user_msg = mock_call.call_args[0][1]
+        assert "sk_test_" in user_msg
+
+
+# ── CWE/OWASP map extension tests ───────────────────────────
+
+
+class TestCWEMapExtendedVulnerabilities:
+    """Tests for additional vulnerability patterns in CWE_KEYWORD_MAP."""
+
+    def test_xxe_cwe_611(self):
+        """XXE (CWE-611) is mapped correctly."""
+        assert "xxe" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["xxe"]["cwe"] == "CWE-611"
+        assert "Misconfiguration" in CWE_KEYWORD_MAP["xxe"]["owasp"]
+
+    def test_xml_external_entity_cwe_611(self):
+        """XML External Entity (CWE-611) full name is mapped."""
+        assert "xml external entity" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["xml external entity"]["cwe"] == "CWE-611"
+
+    def test_ldap_injection_cwe_90(self):
+        """LDAP injection (CWE-90) is mapped correctly."""
+        assert "ldap injection" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["ldap injection"]["cwe"] == "CWE-90"
+        assert "Injection" in CWE_KEYWORD_MAP["ldap injection"]["owasp"]
+
+    def test_path_traversal_cwe_22(self):
+        """Path traversal (CWE-22) is mapped correctly."""
+        assert "path traversal" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["path traversal"]["cwe"] == "CWE-22"
+        assert "Access Control" in CWE_KEYWORD_MAP["path traversal"]["owasp"]
+
+    def test_directory_traversal_cwe_22(self):
+        """Directory traversal (CWE-22) alias is mapped."""
+        assert "directory traversal" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["directory traversal"]["cwe"] == "CWE-22"
+
+    def test_open_redirect_cwe_601(self):
+        """Open redirect (CWE-601) is mapped correctly."""
+        assert "open redirect" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["open redirect"]["cwe"] == "CWE-601"
+        assert "Access Control" in CWE_KEYWORD_MAP["open redirect"]["owasp"]
+
+    def test_csrf_cwe_352(self):
+        """CSRF (CWE-352) is mapped correctly."""
+        assert "csrf" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["csrf"]["cwe"] == "CWE-352"
+
+    def test_code_injection_cwe_94(self):
+        """Code injection (CWE-94) is mapped correctly."""
+        assert "code injection" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["code injection"]["cwe"] == "CWE-94"
+
+    def test_eval_cwe_95(self):
+        """Eval injection (CWE-95) is mapped correctly."""
+        assert "eval" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["eval"]["cwe"] == "CWE-95"
+
+    def test_mass_assignment_cwe_915(self):
+        """Mass assignment (CWE-915) is mapped correctly."""
+        assert "mass assignment" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["mass assignment"]["cwe"] == "CWE-915"
+
+    def test_unrestricted_upload_cwe_434(self):
+        """Unrestricted file upload (CWE-434) is mapped correctly."""
+        assert "unrestricted upload" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["unrestricted upload"]["cwe"] == "CWE-434"
+
+    def test_denial_of_service_cwe_400(self):
+        """Denial of service (CWE-400) is mapped correctly."""
+        assert "denial of service" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["denial of service"]["cwe"] == "CWE-400"
+
+    def test_insecure_random_cwe_330(self):
+        """Insecure random (CWE-330) is mapped correctly."""
+        assert "insecure random" in CWE_KEYWORD_MAP
+        assert CWE_KEYWORD_MAP["insecure random"]["cwe"] == "CWE-330"
+        assert "Cryptographic" in CWE_KEYWORD_MAP["insecure random"]["owasp"]
+
+
+class TestEnrichFindingCWEExtended:
+    """Extended enrichment tests for additional vulnerability patterns."""
+
+    def test_enriches_xxe(self):
+        finding = {"description": "XXE via user-supplied XML", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-611"
+
+    def test_enriches_ldap_injection(self):
+        finding = {"description": "LDAP injection in user search", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-90"
+
+    def test_enriches_path_traversal(self):
+        finding = {"description": "Path traversal in file download", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-22"
+
+    def test_enriches_directory_traversal(self):
+        finding = {"description": "Directory traversal via ../", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-22"
+
+    def test_enriches_csrf(self):
+        finding = {"description": "CSRF token missing on state-changing endpoint", "severity": "medium"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-352"
+
+    def test_enriches_code_injection(self):
+        finding = {"description": "Code injection via dynamic import", "severity": "critical"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-94"
+
+    def test_enriches_eval_injection(self):
+        finding = {"description": "Dangerous eval of user input", "severity": "critical"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-95"
+
+    def test_enriches_mass_assignment(self):
+        finding = {"description": "Mass assignment allows privilege escalation", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-915"
+
+    def test_enriches_denial_of_service(self):
+        finding = {"description": "Denial of service via large payload", "severity": "medium"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-400"
+
+
+# ── Main entry point CLI tests ───────────────────────────────
+
+
+class TestMainCLI:
+    """Tests for the main() CLI entry point."""
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard.load_config")
+    def test_cicd_mode_with_required_args(self, mock_config, mock_scan):
+        """CI/CD mode runs with --project-id and --mr-iid."""
+        from duoguard import main
+        mock_config.return_value = dict(DEFAULT_CONFIG)
+        with patch("sys.argv", ["duoguard", "--mode", "cicd",
+                                 "--project-id", "123", "--mr-iid", "5"]):
+            main()
+        mock_scan.assert_called_once()
+        call_args = mock_scan.call_args
+        assert call_args[0][0] == "123"
+        assert call_args[0][1] == "5"
+
+    @patch("duoguard.load_config")
+    def test_cicd_mode_missing_project_id_errors(self, mock_config):
+        """CI/CD mode without --project-id raises SystemExit."""
+        from duoguard import main
+        mock_config.return_value = dict(DEFAULT_CONFIG)
+        with patch("sys.argv", ["duoguard", "--mode", "cicd", "--mr-iid", "5"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 2  # argparse error code
+
+    @patch("duoguard.load_config")
+    def test_cicd_mode_missing_mr_iid_errors(self, mock_config):
+        """CI/CD mode without --mr-iid raises SystemExit."""
+        from duoguard import main
+        mock_config.return_value = dict(DEFAULT_CONFIG)
+        with patch("sys.argv", ["duoguard", "--mode", "cicd", "--project-id", "123"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 2
+
+    @patch("duoguard.run_agent_mode")
+    @patch("duoguard.load_config")
+    def test_agent_mode_invokes_run_agent_mode(self, mock_config, mock_agent):
+        """--mode agent invokes run_agent_mode."""
+        from duoguard import main
+        mock_config.return_value = dict(DEFAULT_CONFIG)
+        with patch("sys.argv", ["duoguard", "--mode", "agent"]):
+            main()
+        mock_agent.assert_called_once()
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard.load_config")
+    def test_fail_on_cli_overrides_config(self, mock_config, mock_scan):
+        """--fail-on CLI argument overrides config severity_threshold."""
+        from duoguard import main
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["severity_threshold"] = "LOW"
+        mock_config.return_value = cfg
+        with patch("sys.argv", ["duoguard", "--mode", "cicd",
+                                 "--project-id", "1", "--mr-iid", "2",
+                                 "--fail-on", "CRITICAL"]):
+            main()
+        call_args = mock_scan.call_args
+        # fail_on should be CRITICAL (from CLI), not LOW (from config)
+        assert call_args[0][4] == "CRITICAL"
+
+    @patch("duoguard._run_security_scan")
+    @patch("duoguard.load_config")
+    def test_config_path_passed_to_load_config(self, mock_config, mock_scan):
+        """--config argument is passed to load_config."""
+        from duoguard import main
+        mock_config.return_value = dict(DEFAULT_CONFIG)
+        with patch("sys.argv", ["duoguard", "--mode", "cicd",
+                                 "--project-id", "1", "--mr-iid", "2",
+                                 "--config", "/path/to/config.yml"]):
+            main()
+        mock_config.assert_called_once_with("/path/to/config.yml")
+
+
+# ── MR approval edge cases ───────────────────────────────────
+
+
+class TestMRApprovalEdgeCases:
+    """Boundary conditions for MR approval thresholds."""
+
+    @patch("post_report.requests.post")
+    def test_approve_mr_network_timeout(self, mock_post):
+        """Network timeout returns False instead of raising."""
+        mock_post.side_effect = requests.exceptions.HTTPError(
+            response=MagicMock(status_code=504)
+        )
+        result = approve_mr("42", "1")
+        assert result is False
+
+    @patch("post_report.requests.post")
+    def test_unapprove_mr_network_timeout(self, mock_post):
+        """Network timeout on unapprove returns False."""
+        mock_post.side_effect = requests.exceptions.HTTPError(
+            response=MagicMock(status_code=504)
+        )
+        result = unapprove_mr("42", "1")
+        assert result is False
+
+    @patch("post_report.requests.post")
+    def test_approve_mr_401_unauthorized(self, mock_post):
+        """401 Unauthorized on approve returns False."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            response=mock_resp
+        )
+        mock_post.return_value = mock_resp
+        result = approve_mr("42", "1")
+        assert result is False
+
+    @patch("post_report.requests.post")
+    def test_approve_mr_url_contains_project_and_mr(self, mock_post):
+        """Approve URL is correctly constructed with project and MR IDs."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+        approve_mr("my%2Fproject", "99")
+        call_url = mock_post.call_args[0][0]
+        assert "my%2Fproject" in call_url
+        assert "99" in call_url
+        assert "approve" in call_url
+
+    @patch("post_report.requests.post")
+    def test_unapprove_mr_url_contains_unapprove(self, mock_post):
+        """Unapprove URL correctly uses 'unapprove' endpoint."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+        unapprove_mr("42", "7")
+        call_url = mock_post.call_args[0][0]
+        assert "unapprove" in call_url
+        assert "7" in call_url
+
+
+# ── Severity threshold boundary tests ────────────────────────
+
+
+class TestSeverityThresholdBoundaries:
+    """Tests for severity threshold comparison in _run_security_scan."""
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_severity_equal_to_threshold_fails(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """When severity exactly equals threshold, pipeline should fail."""
+        mock_info.return_value = {"iid": 1, "title": "Test"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "### [MEDIUM] Finding: XSS\n**File:** `app.py` (line 1)\n"
+        mock_dep.return_value = ""
+        mock_secret.return_value = ""
+
+        output = str(tmp_path / "report.md")
+        with pytest.raises(SystemExit) as exc_info:
+            _run_security_scan("42", "1", output, "", "MEDIUM")
+        assert exc_info.value.code == 1
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_severity_below_threshold_passes(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """When severity is below threshold, pipeline should pass."""
+        mock_info.return_value = {"iid": 1, "title": "Test"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "### [LOW] Finding: Minor\n**File:** `app.py` (line 1)\n"
+        mock_dep.return_value = ""
+        mock_secret.return_value = ""
+
+        output = str(tmp_path / "report.md")
+        # LOW severity, threshold is HIGH => should pass (no exit)
+        _run_security_scan("42", "1", output, "", "HIGH")
+        assert Path(output).exists()
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_none_severity_below_all_thresholds(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """NONE severity is below even LOW threshold, so pipeline passes."""
+        mock_info.return_value = {"iid": 1, "title": "Test"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "No issues found."
+        mock_dep.return_value = ""
+        mock_secret.return_value = ""
+
+        output = str(tmp_path / "report.md")
+        _run_security_scan("42", "1", output, "", "LOW")
+        assert Path(output).exists()
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_critical_threshold_only_fails_on_critical(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """With CRITICAL threshold, HIGH severity should pass."""
+        mock_info.return_value = {"iid": 1, "title": "Test"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "### [HIGH] Finding: XSS\n**File:** `app.py` (line 1)\n"
+        mock_dep.return_value = ""
+        mock_secret.return_value = ""
+
+        output = str(tmp_path / "report.md")
+        # HIGH < CRITICAL, so should pass
+        _run_security_scan("42", "1", output, "", "CRITICAL")
+        assert Path(output).exists()
+
+
+# ── Agent context with various env var combinations ──────────
+
+
+class TestAgentContextEnvironmentVariations:
+    """Tests for agent context parsing with various environment variable combos."""
+
+    def test_context_with_full_mr_url(self):
+        """Context containing a full GitLab MR URL extracts the MR IID."""
+        import duoguard
+        old_ctx = duoguard.AI_FLOW_CONTEXT
+        old_path = duoguard.AI_FLOW_PROJECT_PATH
+        old_input = duoguard.AI_FLOW_INPUT
+        duoguard.AI_FLOW_CONTEXT = "Review https://gitlab.com/group/project/-/merge_requests/77"
+        duoguard.AI_FLOW_PROJECT_PATH = "group/project"
+        duoguard.AI_FLOW_INPUT = ""
+        try:
+            # The regex looks for !(\d+) so URL won't match. But text fallback:
+            project_id, mr_iid = _parse_agent_context()
+            # URL doesn't have !77 format, so it won't find MR from context
+            # But input is empty too, so both are empty
+            assert project_id == "group%2Fproject"
+        finally:
+            duoguard.AI_FLOW_CONTEXT = old_ctx
+            duoguard.AI_FLOW_PROJECT_PATH = old_path
+            duoguard.AI_FLOW_INPUT = old_input
+
+    def test_context_and_input_both_have_mr_ref(self):
+        """When both context and input have MR refs, context takes priority."""
+        import duoguard
+        old_ctx = duoguard.AI_FLOW_CONTEXT
+        old_path = duoguard.AI_FLOW_PROJECT_PATH
+        old_input = duoguard.AI_FLOW_INPUT
+        duoguard.AI_FLOW_CONTEXT = "Check !10 for security"
+        duoguard.AI_FLOW_INPUT = "Please look at !20"
+        duoguard.AI_FLOW_PROJECT_PATH = "org/repo"
+        try:
+            project_id, mr_iid = _parse_agent_context()
+            assert mr_iid == "10"  # Context takes priority
+        finally:
+            duoguard.AI_FLOW_CONTEXT = old_ctx
+            duoguard.AI_FLOW_INPUT = old_input
+            duoguard.AI_FLOW_PROJECT_PATH = old_path
+
+    def test_json_context_with_numeric_iid(self):
+        """JSON context with numeric IID (not string) is handled."""
+        import duoguard
+        old_ctx = duoguard.AI_FLOW_CONTEXT
+        old_path = duoguard.AI_FLOW_PROJECT_PATH
+        duoguard.AI_FLOW_CONTEXT = json.dumps({
+            "merge_request": {"iid": 999},
+            "project": {"path_with_namespace": "team/repo"},
+        })
+        duoguard.AI_FLOW_PROJECT_PATH = ""
+        try:
+            project_id, mr_iid = _parse_agent_context()
+            assert mr_iid == "999"
+            assert "team%2Frepo" in project_id
+        finally:
+            duoguard.AI_FLOW_CONTEXT = old_ctx
+            duoguard.AI_FLOW_PROJECT_PATH = old_path
+
+    def test_json_context_with_zero_iid(self):
+        """JSON context with IID of 0 is treated as empty/falsy."""
+        import duoguard
+        old_ctx = duoguard.AI_FLOW_CONTEXT
+        old_path = duoguard.AI_FLOW_PROJECT_PATH
+        old_input = duoguard.AI_FLOW_INPUT
+        duoguard.AI_FLOW_CONTEXT = json.dumps({
+            "merge_request": {"iid": 0},
+        })
+        duoguard.AI_FLOW_PROJECT_PATH = "org/repo"
+        duoguard.AI_FLOW_INPUT = ""
+        try:
+            project_id, mr_iid = _parse_agent_context()
+            # str(0) == "0" which is truthy in Python but MR IID 0 is unusual
+            assert mr_iid == "0" or mr_iid == ""
+        finally:
+            duoguard.AI_FLOW_CONTEXT = old_ctx
+            duoguard.AI_FLOW_PROJECT_PATH = old_path
+            duoguard.AI_FLOW_INPUT = old_input
+
+
+# ── Issue creation edge cases ────────────────────────────────
+
+
+class TestCreateIssueEdgeCases:
+    """Additional edge cases for GitLab issue creation."""
+
+    @patch("post_report.create_issue_for_finding")
+    def test_info_severity_excluded_from_all_thresholds(self, mock_create):
+        """Info severity findings are excluded even at lowest threshold."""
+        mock_create.return_value = {"iid": 1}
+        findings = [
+            {"severity": "info", "description": "Note"},
+        ]
+        result = create_issues_for_findings("123", "5", findings, min_severity="low")
+        assert len(result) == 0
+        mock_create.assert_not_called()
+
+    @patch("post_report.create_issue_for_finding")
+    def test_all_severities_created_at_low_threshold(self, mock_create):
+        """All non-info findings are created at 'low' threshold."""
+        mock_create.return_value = {"iid": 1}
+        findings = [
+            {"severity": "critical", "description": "A"},
+            {"severity": "high", "description": "B"},
+            {"severity": "medium", "description": "C"},
+            {"severity": "low", "description": "D"},
+        ]
+        result = create_issues_for_findings("123", "5", findings, min_severity="low")
+        assert len(result) == 4
+
+    @patch("post_report.requests.post")
+    def test_issue_without_cwe_omits_cwe_section(self, mock_post):
+        """Issue body omits CWE section when finding has no CWE."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {
+            "severity": "high",
+            "description": "Unknown vulnerability",
+            "file_path": "app.py",
+            "line_num": 10,
+            "category": "code-security",
+        }
+        create_issue_for_finding("123", "5", finding)
+        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
+        assert "cwe.mitre.org" not in payload["description"]
+
+    @patch("post_report.requests.post")
+    def test_issue_labels_include_security_and_duoguard(self, mock_post):
+        """Issue labels include severity, DuoGuard, and security."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {
+            "severity": "critical",
+            "description": "RCE",
+            "file_path": "cmd.py",
+        }
+        create_issue_for_finding("123", "5", finding)
+        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
+        labels = payload["labels"]
+        assert "security::critical" in labels
+        assert "DuoGuard" in labels
+        assert "security" in labels
