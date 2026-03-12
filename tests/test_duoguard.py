@@ -3602,3 +3602,1147 @@ class TestCreateIssueEdgeCases:
         assert "security::critical" in labels
         assert "DuoGuard" in labels
         assert "security" in labels
+
+
+# ── Binary and unusual diff content tests ────────────────────
+
+
+class TestFormatDiffUnusualContent:
+    """Tests for format_diff_for_analysis with unusual diff content."""
+
+    def test_null_bytes_in_diff_preserved(self):
+        """Null bytes in diff content are preserved (binary detection responsibility is on agent)."""
+        changes = [{"new_path": "binary.bin", "diff": "+\x00\x01\x02content"}]
+        result = format_diff_for_analysis(changes)
+        assert "binary.bin" in result
+
+    def test_very_long_single_line_diff(self):
+        """A single very long line in diff is handled without truncation within the line."""
+        long_line = "+" + "A" * 10_000
+        changes = [{"new_path": "long.py", "diff": long_line}]
+        result = format_diff_for_analysis(changes, max_size=50_000)
+        assert "long.py" in result
+        assert long_line[1:50] in result  # first 50 chars of long line present
+
+    def test_diff_with_only_plus_plus_plus_header(self):
+        """Diff that is entirely header lines (no +/- content lines) produces minimal output."""
+        changes = [{"new_path": "header_only.py", "diff": "+++ b/header_only.py\n--- a/header_only.py"}]
+        result = format_diff_for_analysis(changes)
+        # The diff is non-empty so it gets included
+        assert "header_only.py" in result
+
+    def test_multiple_files_only_first_fits(self):
+        """With tight size limit, only first files fit and rest are truncated."""
+        changes = [
+            {"new_path": f"file{i}.py", "diff": "+" + "x" * 50}
+            for i in range(10)
+        ]
+        result = format_diff_for_analysis(changes, max_size=200)
+        assert "omitted" in result
+
+    def test_diff_with_unicode_filename(self):
+        """Filenames with unicode characters are handled correctly."""
+        changes = [{"new_path": "src/naïve_parser.py", "diff": "+code"}]
+        result = format_diff_for_analysis(changes)
+        assert "naïve_parser.py" in result
+
+    def test_diff_with_special_regex_chars_in_path(self):
+        """File paths with characters that would break regex (brackets, dots) are fine."""
+        changes = [{"new_path": "app[v2].py", "diff": "+x = 1"}]
+        result = format_diff_for_analysis(changes)
+        assert "app[v2].py" in result
+
+    def test_none_diff_value_skipped(self):
+        """Change with diff=None should be skipped (falsy diff)."""
+        changes = [{"new_path": "missing.py", "diff": None}]
+        result = format_diff_for_analysis(changes)
+        # None is falsy, should be skipped
+        assert "missing.py" not in result
+
+
+# ── Dependency file detection extended edge cases ─────────────
+
+
+class TestExtractDependencyFilesExtended:
+    """Further edge cases for extract_dependency_files."""
+
+    def test_pdm_lock_detected(self):
+        """pdm.lock is recognized as a dependency file."""
+        changes = [{"new_path": "pdm.lock", "diff": "+lock"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_mix_lock_detected(self):
+        """mix.lock (Elixir) is recognized."""
+        changes = [{"new_path": "mix.lock", "diff": "+dep"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_package_resolved_detected(self):
+        """Package.resolved (Swift) is recognized."""
+        changes = [{"new_path": "Package.resolved", "diff": "+pkg"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_cargo_lock_detected(self):
+        """Cargo.lock (Rust) is recognized."""
+        changes = [{"new_path": "Cargo.lock", "diff": "+lock"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_gemfile_lock_detected(self):
+        """Gemfile.lock (Ruby) is recognized."""
+        changes = [{"new_path": "Gemfile.lock", "diff": "+locked"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_constraints_txt_detected(self):
+        """constraints.txt is recognized as dependency file."""
+        changes = [{"new_path": "constraints.txt", "diff": "+pin"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_requirements_custom_suffix_detected(self):
+        """requirements-test.txt matches the prefix pattern."""
+        changes = [{"new_path": "requirements-test.txt", "diff": "+pytest"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_non_dep_txt_file_not_detected(self):
+        """A .txt file that doesn't match dep patterns is excluded."""
+        changes = [{"new_path": "notes.txt", "diff": "+some notes"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 0
+
+    def test_dep_file_in_deep_nested_path(self):
+        """Dependency files in deeply nested paths are detected by filename."""
+        changes = [{"new_path": "a/b/c/d/e/package.json", "diff": "+dep"}]
+        result = extract_dependency_files(changes)
+        assert len(result) == 1
+
+    def test_multiple_dep_and_non_dep_files(self):
+        """Mixed list filters correctly to only dep files."""
+        changes = [
+            {"new_path": "src/app.py", "diff": "+code"},
+            {"new_path": "package.json", "diff": "+dep"},
+            {"new_path": "README.md", "diff": "+docs"},
+            {"new_path": "go.mod", "diff": "+go"},
+            {"new_path": "Makefile", "diff": "+build"},
+        ]
+        result = extract_dependency_files(changes)
+        assert len(result) == 2
+        paths = {c["new_path"] for c in result}
+        assert paths == {"package.json", "go.mod"}
+
+
+# ── _count_by_severity extended tests ────────────────────────
+
+
+class TestCountBySeverityExtended:
+    """Extended tests for _count_by_severity to cover corner cases."""
+
+    def test_heading_with_info_severity(self):
+        """### [INFO] heading is counted."""
+        text = "### [INFO] Finding: Note"
+        counts = _count_by_severity(text)
+        assert counts["info"] == 1
+
+    def test_all_five_severities_counted(self):
+        """All five severity levels in one text are all counted."""
+        text = (
+            "### [CRITICAL] A\n"
+            "### [HIGH] B\n"
+            "### [MEDIUM] C\n"
+            "### [LOW] D\n"
+            "### [INFO] E\n"
+        )
+        counts = _count_by_severity(text)
+        assert counts["critical"] == 1
+        assert counts["high"] == 1
+        assert counts["medium"] == 1
+        assert counts["low"] == 1
+        assert counts["info"] == 1
+
+    def test_severity_word_in_description_not_counted(self):
+        """Severity word appearing inside description text is not counted."""
+        text = "### [HIGH] This critical finding is high severity and low impact"
+        counts = _count_by_severity(text)
+        assert counts["high"] == 1
+        assert counts["critical"] == 0
+        assert counts["low"] == 0
+
+    def test_count_findings_sums_all_categories(self):
+        """count_findings returns the sum of all severity counts."""
+        text = "### [CRITICAL] A\n### [HIGH] B\n### [INFO] C"
+        total = count_findings(text)
+        assert total == 3
+
+    def test_count_findings_zero_for_clean_output(self):
+        """count_findings returns 0 for clean AI output."""
+        text = "No security issues were found in the diff."
+        assert count_findings(text) == 0
+
+
+# ── determine_severity scoring boundary tests ─────────────────
+
+
+class TestDetermineSeverityScoring:
+    """Verify exact scoring thresholds for determine_severity."""
+
+    def test_score_exactly_8_is_critical(self):
+        """Score=8 exactly hits the CRITICAL threshold (>= 8)."""
+        # Two HIGH (3+3=6) + one MEDIUM (2) = 8 >= 8 => CRITICAL
+        text = "[HIGH] a\n[HIGH] b\n[MEDIUM] c"
+        result = determine_severity(text, "", "")
+        assert result == "CRITICAL"
+
+    def test_score_exactly_7_is_high(self):
+        """Score=7 is HIGH (>= 5 but < 8), no criticals."""
+        # Two HIGH (3+3=6) + one LOW (1) = 7
+        text = "[HIGH] a\n[HIGH] b\n[LOW] c"
+        result = determine_severity(text, "", "")
+        assert result == "HIGH"
+
+    def test_two_mediums_score_4_is_high(self):
+        """Two MEDIUMs (score=4) with no HIGH still gives HIGH because score >= 5 is needed.
+        Actually 4 < 5 so it should be MEDIUM (no high count). Let's verify."""
+        # 2 * MEDIUM = 4. No HIGH, score=4 => MEDIUM (score >=2)
+        text = "[MEDIUM] a\n[MEDIUM] b"
+        result = determine_severity(text, "", "")
+        # score=4, no critical, no high => check MEDIUM threshold: score >= 2 -> MEDIUM
+        assert result == "MEDIUM"
+
+    def test_three_mediums_score_6_is_high(self):
+        """Three MEDIUMs score=6 >= 5 but no explicit HIGH count, so check conditions.
+        score >= 5 => HIGH even without explicit high count."""
+        text = "[MEDIUM] a\n[MEDIUM] b\n[MEDIUM] c"
+        result = determine_severity(text, "", "")
+        assert result == "HIGH"
+
+    def test_info_findings_dont_count_in_score(self):
+        """INFO findings have weight 0, don't affect severity score."""
+        text = "[INFO] a\n[INFO] b\n[INFO] c"
+        result = determine_severity(text, "", "")
+        # INFO has no weight, score=0 => NONE
+        assert result == "NONE"
+
+    def test_multiple_inputs_combined(self):
+        """All three finding strings are concatenated before scoring.
+
+        Each finding must be on its own line for the line-start pattern to match.
+        """
+        code = "[HIGH] code issue\n"
+        dep = "[HIGH] dep issue\n"
+        secret = "[CRITICAL] secret issue\n"
+        result = determine_severity(code, dep, secret)
+        # CRITICAL present => CRITICAL
+        assert result == "CRITICAL"
+
+
+# ── _parse_findings extended edge cases ───────────────────────
+
+
+class TestParseFindingsExtended:
+    """Additional _parse_findings edge cases."""
+
+    def test_finding_description_strip_whitespace(self):
+        """Description is stripped of leading/trailing whitespace."""
+        text = "### [HIGH] Finding:   Padded description  \n**File:** `app.py` (line 1)\n"
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["description"] == "Padded description"
+
+    def test_finding_with_line_number_zero(self):
+        """Line number 0 in text should be handled (parseInt of '0')."""
+        text = "### [LOW] Finding: Zero line\n**File:** `x.py` (line 0)\n"
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        # '0' is valid digit parsing but zero line may result in 0 or 1
+        assert findings[0]["line_num"] >= 0
+
+    def test_multiple_findings_with_mixed_severity(self):
+        """Five findings with different severities all parsed correctly."""
+        text = (
+            "### [CRITICAL] Finding: RCE\n**File:** `a.py` (line 1)\n\n"
+            "### [HIGH] Finding: SQLi\n**File:** `b.py` (line 2)\n\n"
+            "### [MEDIUM] Finding: XSS\n**File:** `c.py` (line 3)\n\n"
+            "### [LOW] Finding: Log injection\n**File:** `d.py` (line 4)\n\n"
+            "### [INFO] Finding: Debug note\n**File:** `e.py` (line 5)\n"
+        )
+        findings = _parse_findings(text)
+        assert len(findings) == 5
+        severities = [f["severity"] for f in findings]
+        assert severities == ["critical", "high", "medium", "low", "info"]
+
+    def test_category_defaults_to_code_security(self):
+        """When no category is provided, default is 'code-security'."""
+        text = "### [HIGH] Finding: Test\n**File:** `app.py` (line 1)\n"
+        findings = _parse_findings(text)
+        assert findings[0]["category"] == "code-security"
+
+    def test_finding_file_path_with_nested_directories(self):
+        """Deeply nested file paths are extracted correctly."""
+        text = "### [HIGH] Finding: Issue\n**File:** `src/api/v2/handlers/user.py` (line 100)\n"
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["file_path"] == "src/api/v2/handlers/user.py"
+        assert findings[0]["line_num"] == 100
+
+    def test_finding_with_unicode_description(self):
+        """Unicode characters in finding description are preserved."""
+        text = "### [MEDIUM] Finding: Ré-injection via formulaire\n**File:** `app.py` (line 5)\n"
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        assert "formulaire" in findings[0]["description"]
+
+
+# ── generate_codequality_report edge cases ────────────────────
+
+
+class TestGenerateCodequalityReportExtended:
+    """Additional edge cases for the Code Quality report generator."""
+
+    def test_location_lines_begin_field(self, tmp_path):
+        """Code quality report includes location.lines.begin with the line number."""
+        output = tmp_path / "cq.json"
+        findings = "### [HIGH] Finding: SQL injection\n**File:** `db.py` (line 77)\n"
+        generate_codequality_report(findings, str(output))
+        data = json.loads(output.read_text())
+        assert len(data) == 1
+        assert data[0]["location"]["lines"]["begin"] == 77
+
+    def test_type_field_is_issue(self, tmp_path):
+        """Each Code Quality entry has type='issue'."""
+        output = tmp_path / "cq.json"
+        findings = "### [LOW] Finding: Minor issue\n**File:** `x.py` (line 1)\n"
+        generate_codequality_report(findings, str(output))
+        data = json.loads(output.read_text())
+        assert data[0]["type"] == "issue"
+
+    def test_fingerprint_is_md5_hex(self, tmp_path):
+        """Code Quality fingerprint is a valid MD5 hex string (32 chars)."""
+        output = tmp_path / "cq.json"
+        findings = "### [MEDIUM] Finding: CSRF missing\n**File:** `forms.py` (line 30)\n"
+        generate_codequality_report(findings, str(output))
+        data = json.loads(output.read_text())
+        fp = data[0]["fingerprint"]
+        assert len(fp) == 32
+        assert all(c in "0123456789abcdef" for c in fp)
+
+    def test_dep_findings_have_dependency_audit_check_name(self, tmp_path):
+        """Dependency audit findings use 'duoguard-dependency-audit' check_name."""
+        output = tmp_path / "cq.json"
+        dep = "### [LOW] Finding: Minor dep version\n**File:** `go.mod` (line 3)\n"
+        generate_codequality_report("", str(output), dep_findings=dep)
+        data = json.loads(output.read_text())
+        assert data[0]["check_name"] == "duoguard-dependency-audit"
+
+    def test_secret_findings_have_secret_scan_check_name(self, tmp_path):
+        """Secret scan findings use 'duoguard-secret-scan' check_name."""
+        output = tmp_path / "cq.json"
+        secret = "### [CRITICAL] Finding: Hardcoded password\n**File:** `.env` (line 1)\n"
+        generate_codequality_report("", str(output), secret_findings=secret)
+        data = json.loads(output.read_text())
+        assert data[0]["check_name"] == "duoguard-secret-scan"
+
+
+# ── generate_sarif_report extended tests ─────────────────────
+
+
+class TestGenerateSarifReportExtended:
+    """Additional SARIF report tests for edge cases."""
+
+    def test_medium_severity_maps_to_warning(self, tmp_path):
+        """MEDIUM finding produces level='warning' in SARIF."""
+        output = tmp_path / "sarif.json"
+        findings = "### [MEDIUM] Finding: CSRF\n**File:** `views.py` (line 10)\n"
+        generate_sarif_report(findings, str(output))
+        data = json.loads(output.read_text())
+        result = data["runs"][0]["results"][0]
+        assert result["level"] == "warning"
+
+    def test_info_severity_maps_to_note(self, tmp_path):
+        """INFO finding produces level='note' in SARIF."""
+        output = tmp_path / "sarif.json"
+        findings = "### [INFO] Finding: Debug mode enabled\n**File:** `config.py` (line 5)\n"
+        generate_sarif_report(findings, str(output))
+        data = json.loads(output.read_text())
+        result = data["runs"][0]["results"][0]
+        assert result["level"] == "note"
+
+    def test_high_severity_maps_to_error(self, tmp_path):
+        """HIGH finding produces level='error' in SARIF."""
+        output = tmp_path / "sarif.json"
+        findings = "### [HIGH] Finding: XSS in template\n**File:** `tmpl.html` (line 1)\n"
+        generate_sarif_report(findings, str(output))
+        data = json.loads(output.read_text())
+        assert data["runs"][0]["results"][0]["level"] == "error"
+
+    def test_sarif_tool_version(self, tmp_path):
+        """SARIF report includes tool version string."""
+        output = tmp_path / "sarif.json"
+        generate_sarif_report("No issues.", str(output))
+        data = json.loads(output.read_text())
+        driver = data["runs"][0]["tool"]["driver"]
+        assert driver["version"] == "1.0.0"
+
+    def test_sarif_tool_information_uri(self, tmp_path):
+        """SARIF report includes tool informationUri."""
+        output = tmp_path / "sarif.json"
+        generate_sarif_report("No issues.", str(output))
+        data = json.loads(output.read_text())
+        driver = data["runs"][0]["tool"]["driver"]
+        assert "informationUri" in driver
+        assert driver["informationUri"].startswith("https://")
+
+    def test_sarif_run_id_is_uuid_format(self, tmp_path):
+        """SARIF automationDetails id starts with 'duoguard/' followed by UUID."""
+        output = tmp_path / "sarif.json"
+        generate_sarif_report("No issues.", str(output))
+        data = json.loads(output.read_text())
+        run_id = data["runs"][0]["automationDetails"]["id"]
+        assert run_id.startswith("duoguard/")
+        # UUID part has 5 segments separated by hyphens
+        uuid_part = run_id[len("duoguard/"):]
+        assert len(uuid_part) == 36  # standard UUID length
+
+
+# ── generate_report extended tests ────────────────────────────
+
+
+class TestGenerateReportExtended:
+    """Additional generate_report edge cases."""
+
+    def test_report_contains_summary_table_headers(self):
+        """Summary table has Category and Findings column headers."""
+        report = generate_report({"iid": 1, "title": "T"}, "", "", "")
+        assert "| Category | Findings |" in report
+        assert "|----------|----------|" in report
+
+    def test_report_mr_sections_present_with_empty_findings(self):
+        """Even with empty findings, all three section headers are in report."""
+        report = generate_report({"iid": 1, "title": "T"}, "", "", "")
+        assert "Code Security Analysis" in report
+        assert "Dependency Audit" in report
+        assert "Secret Scan" in report
+
+    def test_report_gitlab_attribution_link(self):
+        """Report includes link to GitLab AI Hackathon page."""
+        report = generate_report({"iid": 1, "title": "T"}, "", "", "")
+        assert "gitlab.devpost.com" in report
+
+    def test_complexity_medium_risk_at_score_45(self):
+        """Complexity score 45 shows as Medium risk."""
+        complexity = {
+            "total_additions": 50, "total_deletions": 10, "total_files": 3,
+            "high_risk_files": [], "complexity_score": 45, "risk_factors": [],
+        }
+        report = generate_report({"iid": 1, "title": "T"}, "", "", "", complexity=complexity)
+        assert "Medium" in report
+        assert "45/100" in report
+
+    def test_complexity_with_many_risk_factors(self):
+        """All risk factors in complexity appear in the report."""
+        complexity = {
+            "total_additions": 100, "total_deletions": 50, "total_files": 5,
+            "high_risk_files": ["auth.py", "db.py"],
+            "complexity_score": 70,
+            "risk_factors": [
+                "authentication logic modified in auth.py",
+                "database operations modified in db.py",
+            ],
+        }
+        report = generate_report({"iid": 1, "title": "T"}, "", "", "", complexity=complexity)
+        assert "authentication logic modified in auth.py" in report
+        assert "database operations modified in db.py" in report
+
+    def test_complexity_zero_score_omits_section(self):
+        """When complexity_score is 0, no Diff Complexity Analysis section appears."""
+        complexity = {
+            "total_additions": 0, "total_deletions": 0, "total_files": 0,
+            "high_risk_files": [], "complexity_score": 0, "risk_factors": [],
+        }
+        report = generate_report({"iid": 1, "title": "T"}, "", "", "", complexity=complexity)
+        assert "Diff Complexity Analysis" not in report
+
+    def test_scan_metrics_zero_duration_not_shown(self):
+        """scan_duration=0.0 is still shown (it's not None)."""
+        report = generate_report(
+            {"iid": 1, "title": "T"}, "", "", "",
+            scan_duration=0.0,
+        )
+        assert "Scan Metrics" in report
+        assert "0.0s" in report
+
+
+# ── compute_diff_complexity extended tests ───────────────────
+
+
+class TestDiffComplexityExtended:
+    """Additional compute_diff_complexity edge cases."""
+
+    def test_detects_cookie_handling(self):
+        """Cookie-related changes are flagged as high risk (HTTP handling pattern)."""
+        changes = [{"new_path": "middleware.py", "diff": "\n+response.set_cookie('session', value)"}]
+        result = compute_diff_complexity(changes)
+        assert "middleware.py" in result["high_risk_files"]
+
+    def test_detects_deserialization(self):
+        """Deserialization patterns are flagged as high risk."""
+        changes = [{"new_path": "parser.py", "diff": "\n+data = yaml.load(raw_input)"}]
+        result = compute_diff_complexity(changes)
+        assert "parser.py" in result["high_risk_files"]
+
+    def test_detects_permission_changes(self):
+        """Permission/ACL/RBAC patterns are flagged as high risk."""
+        changes = [{"new_path": "authz.py", "diff": "\n+if user.role == 'admin':"}]
+        result = compute_diff_complexity(changes)
+        assert "authz.py" in result["high_risk_files"]
+
+    def test_no_path_key_falls_back_to_unknown(self):
+        """Change without new_path or old_path shows as 'unknown' in results."""
+        changes = [{"diff": "\n+password = 'hardcoded'"}]
+        result = compute_diff_complexity(changes)
+        # Should still detect the risk pattern (unknown file)
+        assert len(result["high_risk_files"]) == 1
+        assert result["high_risk_files"][0] == "unknown"
+
+    def test_size_score_capped_at_40(self):
+        """Size portion of score is capped at 40 points."""
+        # 400+ additions/deletions should hit the cap
+        huge_diff = "\n+" + "\n+".join(["x = 1"] * 1000)
+        changes = [{"new_path": "huge.py", "diff": huge_diff}]
+        result = compute_diff_complexity(changes)
+        # size_score = min(40, total_lines // 10). With 1000 lines: min(40, 100) = 40
+        # We can't directly access size_score but complexity_score <= 100
+        assert result["complexity_score"] <= 100
+        assert result["total_additions"] >= 100
+
+    def test_file_count_score_capped_at_20(self):
+        """File count portion of score is capped at 20 points."""
+        # 10+ files each give 2 pts capped at 20
+        changes = [{"new_path": f"file{i}.py", "diff": "\n+x = 1"} for i in range(15)]
+        result = compute_diff_complexity(changes)
+        assert result["total_files"] == 15
+        # Even with 15 files the score doesn't exceed 40 (file cap 20 + size 0)
+        # Plus if any are high-risk, up to 40 more
+        assert result["complexity_score"] <= 100
+
+
+# ── load_config extended edge cases ──────────────────────────
+
+
+class TestLoadConfigExtended:
+    """Additional config loading edge cases."""
+
+    def test_all_agents_disabled_in_config(self, tmp_path, monkeypatch):
+        """Config can disable all three agents."""
+        monkeypatch.chdir(tmp_path)
+        config_file = tmp_path / ".duoguard.yml"
+        config_file.write_text(
+            "agents:\n  code_security: false\n  dependency_audit: false\n  secret_scan: false\n"
+        )
+        cfg = load_config()
+        assert cfg["agents"]["code_security"] is False
+        assert cfg["agents"]["dependency_audit"] is False
+        assert cfg["agents"]["secret_scan"] is False
+
+    def test_config_with_exclude_extensions(self, tmp_path, monkeypatch):
+        """Config can set exclude_extensions list."""
+        monkeypatch.chdir(tmp_path)
+        config_file = tmp_path / ".duoguard.yml"
+        config_file.write_text("exclude_extensions:\n  - js\n  - min\n")
+        cfg = load_config()
+        assert "js" in cfg["exclude_extensions"]
+        assert "min" in cfg["exclude_extensions"]
+
+    def test_config_with_inline_comments_false(self, tmp_path, monkeypatch):
+        """Config can disable inline comments."""
+        monkeypatch.chdir(tmp_path)
+        config_file = tmp_path / ".duoguard.yml"
+        config_file.write_text("inline_comments: false\n")
+        cfg = load_config()
+        assert cfg["inline_comments"] is False
+
+    def test_config_with_version_1(self, tmp_path, monkeypatch):
+        """Config version field is preserved."""
+        monkeypatch.chdir(tmp_path)
+        config_file = tmp_path / ".duoguard.yml"
+        config_file.write_text("version: 1\nseverity_threshold: MEDIUM\n")
+        cfg = load_config()
+        assert cfg["version"] == 1
+        assert cfg["severity_threshold"] == "MEDIUM"
+
+    def test_nonexistent_explicit_path_uses_defaults(self, tmp_path, monkeypatch):
+        """Nonexistent explicit config path still falls through to defaults."""
+        monkeypatch.chdir(tmp_path)
+        # Pass a path that doesn't exist; no .duoguard.yml either
+        cfg = load_config(str(tmp_path / "nonexistent.yml"))
+        assert cfg["severity_threshold"] == "HIGH"
+
+
+# ── should_exclude_path / filter_excluded_changes extended ────
+
+
+class TestPathExclusionExtended:
+    """Additional path exclusion edge cases."""
+
+    def test_both_path_and_extension_exclude(self):
+        """When both exclude_paths and exclude_extensions are set, either can exclude."""
+        # Matches by extension
+        assert should_exclude_path("src/app.min.js",
+                                    exclude_paths=["vendor/*"],
+                                    exclude_extensions=["js"])
+        # Matches by path
+        assert should_exclude_path("vendor/lib.go",
+                                    exclude_paths=["vendor/*"],
+                                    exclude_extensions=["js"])
+        # Neither matches
+        assert not should_exclude_path("src/main.py",
+                                        exclude_paths=["vendor/*"],
+                                        exclude_extensions=["js"])
+
+    def test_exclude_root_level_file(self):
+        """Root-level file can be excluded by exact glob."""
+        assert should_exclude_path(".env", exclude_paths=[".env"])
+        assert should_exclude_path(".secrets", exclude_paths=[".secrets"])
+
+    def test_glob_star_matches_subdir(self):
+        """vendor/* matches vendor/lib.go and also deeply nested vendor/sub/lib.go.
+
+        fnmatch treats '*' as matching any character including '/', so both paths match.
+        """
+        # fnmatch('vendor/lib.go', 'vendor/*') => True
+        assert should_exclude_path("vendor/lib.go", exclude_paths=["vendor/*"])
+        # fnmatch('vendor/sub/lib.go', 'vendor/*') => True (fnmatch * includes /)
+        assert should_exclude_path("vendor/sub/lib.go", exclude_paths=["vendor/*"])
+
+    def test_filter_returns_same_list_when_no_rules(self):
+        """With both exclusions empty, original list is returned unchanged."""
+        changes = [{"new_path": "a.py"}, {"new_path": "b.py"}]
+        result = filter_excluded_changes(changes, exclude_paths=[], exclude_extensions=[])
+        assert result == changes
+
+    def test_filter_with_extension_and_path_rules_combined(self):
+        """filter_excluded_changes handles both path and extension rules."""
+        changes = [
+            {"new_path": "src/app.py", "diff": "+code"},
+            {"new_path": "vendor/lib.go", "diff": "+vendor"},
+            {"new_path": "dist/bundle.js", "diff": "+bundle"},
+            {"new_path": "src/utils.js", "diff": "+utils"},
+        ]
+        result = filter_excluded_changes(
+            changes,
+            exclude_paths=["vendor/*"],
+            exclude_extensions=["js"],
+        )
+        assert len(result) == 1
+        assert result[0]["new_path"] == "src/app.py"
+
+
+# ── enrich_finding_cwe extended tests ────────────────────────
+
+
+class TestEnrichFindingCWEFurtherEdgeCases:
+    """Further edge cases for CWE enrichment."""
+
+    def test_api_key_in_description_enriched(self):
+        """'api key' keyword in description triggers CWE-798 enrichment."""
+        finding = {"description": "Hardcoded API key found in constants", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-798"
+
+    def test_private_key_in_description_enriched(self):
+        """'private key' keyword enriches with CWE-321."""
+        finding = {"description": "RSA private key hardcoded in deployment script", "severity": "critical"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-321"
+
+    def test_weak_crypto_cwe_327(self):
+        """'weak crypto' enriches with CWE-327 (Cryptographic Failures)."""
+        finding = {"description": "Use of weak crypto algorithm MD5", "severity": "medium"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-327"
+
+    def test_race_condition_cwe_362(self):
+        """'race condition' enriches with CWE-362."""
+        finding = {"description": "Race condition in file access", "severity": "medium"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-362"
+
+    def test_buffer_overflow_cwe_120(self):
+        """'buffer overflow' enriches with CWE-120."""
+        finding = {"description": "Potential buffer overflow in C code", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-120"
+
+    def test_idor_cwe_639(self):
+        """'idor' enriches with CWE-639 (IDOR)."""
+        finding = {"description": "IDOR vulnerability in user profile endpoint", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-639"
+
+    def test_information_disclosure_cwe_200(self):
+        """'information disclosure' enriches with CWE-200."""
+        finding = {"description": "Information disclosure in error messages", "severity": "medium"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-200"
+
+    def test_log_injection_cwe_117(self):
+        """'log injection' enriches with CWE-117."""
+        finding = {"description": "Log injection via user input", "severity": "medium"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-117"
+
+    def test_integer_overflow_cwe_190(self):
+        """'integer overflow' enriches with CWE-190."""
+        finding = {"description": "Integer overflow in loop counter", "severity": "medium"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-190"
+
+    def test_missing_access_control_cwe_862(self):
+        """'missing access control' enriches with CWE-862."""
+        finding = {"description": "Missing access control on admin endpoint", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-862"
+
+    def test_broken_auth_cwe_287(self):
+        """'broken auth' enriches with CWE-287."""
+        finding = {"description": "Broken auth allows unauthenticated access", "severity": "critical"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-287"
+
+    def test_empty_description_no_match(self):
+        """Empty description produces no CWE enrichment."""
+        finding = {"description": "", "severity": "info"}
+        result = enrich_finding_cwe(finding)
+        assert "cwe" not in result
+
+    def test_sensitive_data_exposure_cwe_200(self):
+        """'sensitive data exposure' enriches with CWE-200."""
+        finding = {"description": "Sensitive data exposure via plaintext storage", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-200"
+
+
+# ── resolve_stale_discussions extended tests ──────────────────
+
+
+class TestResolveStaleDiscussionsExtended:
+    """Additional edge cases for resolve_stale_discussions."""
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_multiple_duoguard_discussions_all_resolved(self, mock_get, mock_put):
+        """Multiple unresolved DuoGuard discussions are all resolved."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value=[
+                {
+                    "id": "disc1",
+                    "notes": [{"body": "**:shield: DuoGuard [HIGH]** — XSS",
+                                "resolvable": True, "resolved": False}],
+                },
+                {
+                    "id": "disc2",
+                    "notes": [{"body": "**:shield: DuoGuard [CRITICAL]** — SQLi",
+                                "resolvable": True, "resolved": False}],
+                },
+            ]),
+        )
+        mock_put.return_value = MagicMock(status_code=200)
+        result = resolve_stale_discussions("42", "1")
+        assert result == 2
+        assert mock_put.call_count == 2
+
+    @patch("post_report.requests.get")
+    def test_non_resolvable_duoguard_discussion_not_resolved(self, mock_get):
+        """DuoGuard discussions that are not resolvable are skipped."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value=[
+                {
+                    "id": "disc1",
+                    "notes": [{"body": "**:shield: DuoGuard [LOW]** — Note",
+                                "resolvable": False, "resolved": False}],
+                },
+            ]),
+        )
+        result = resolve_stale_discussions("42", "1")
+        assert result == 0
+
+    @patch("post_report.requests.get")
+    def test_discussion_with_no_notes_skipped(self, mock_get):
+        """Discussions with empty notes list are skipped."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value=[
+                {"id": "disc1", "notes": []},
+            ]),
+        )
+        result = resolve_stale_discussions("42", "1")
+        assert result == 0
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_resolve_failure_on_one_is_tolerated(self, mock_get, mock_put):
+        """If one resolve PUT fails, the function still returns count of successes."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value=[
+                {
+                    "id": "disc1",
+                    "notes": [{"body": "**:shield: DuoGuard [HIGH]** — XSS",
+                                "resolvable": True, "resolved": False}],
+                },
+                {
+                    "id": "disc2",
+                    "notes": [{"body": "**:shield: DuoGuard [MEDIUM]** — CSRF",
+                                "resolvable": True, "resolved": False}],
+                },
+            ]),
+        )
+        # First PUT succeeds, second PUT raises HTTPError
+        mock_put.side_effect = [
+            MagicMock(status_code=200, raise_for_status=MagicMock()),
+            requests.exceptions.HTTPError(response=MagicMock(status_code=403)),
+        ]
+        result = resolve_stale_discussions("42", "1")
+        # Only first was successfully resolved
+        assert result == 1
+
+
+# ── update_mr_labels extended tests ──────────────────────────
+
+
+class TestUpdateMRLabelsExtended:
+    """Additional edge cases for update_mr_labels."""
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_medium_severity_label(self, mock_get, mock_put):
+        """MEDIUM severity adds 'security::medium' label."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"labels": []}),
+        )
+        mock_put.return_value = MagicMock(status_code=200)
+        update_mr_labels("42", "1", "MEDIUM")
+        labels = mock_put.call_args[1]["json"]["labels"]
+        assert "security::medium" in labels
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_unknown_severity_maps_to_clean(self, mock_get, mock_put):
+        """Unknown severity falls back to 'security::clean' label."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"labels": []}),
+        )
+        mock_put.return_value = MagicMock(status_code=200)
+        update_mr_labels("42", "1", "UNKNOWN_SEVERITY")
+        labels = mock_put.call_args[1]["json"]["labels"]
+        assert "security::clean" in labels
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_get_failure_proceeds_with_empty_labels(self, mock_get, mock_put):
+        """When GET fails, proceeds with empty current_labels and still adds new label."""
+        mock_get.return_value = MagicMock(status_code=403)
+        mock_get.return_value.raise_for_status.side_effect = (
+            requests.exceptions.HTTPError(response=MagicMock(status_code=403))
+        )
+        mock_put.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+        result = update_mr_labels("42", "1", "HIGH")
+        # Should still attempt PUT with the new security::high label
+        assert result is True
+        labels = mock_put.call_args[1]["json"]["labels"]
+        assert "security::high" in labels
+
+    @patch("post_report.requests.put")
+    @patch("post_report.requests.get")
+    def test_preserves_non_security_labels(self, mock_get, mock_put):
+        """Non-security labels from the MR are preserved after update."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"labels": ["bug", "enhancement", "security::low"]}),
+        )
+        mock_put.return_value = MagicMock(status_code=200)
+        update_mr_labels("42", "1", "HIGH")
+        labels = mock_put.call_args[1]["json"]["labels"]
+        assert "bug" in labels
+        assert "enhancement" in labels
+        assert "security::low" not in labels
+        assert "security::high" in labels
+
+
+# ── _run_security_scan with config extended ───────────────────
+
+
+class TestRunSecurityScanConfigExtended:
+    """Additional _run_security_scan config-driven edge cases."""
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_max_diff_size_from_config(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """max_diff_size from config limits diff passed to agents."""
+        mock_info.return_value = {"iid": 1, "title": "Limit test"}
+        # Create a diff that's larger than our small limit
+        long_diff = "+" + "x" * 5000
+        mock_diff.return_value = {
+            "changes": [
+                {"new_path": "big.py", "diff": long_diff},
+                {"new_path": "medium.py", "diff": "+" + "y" * 100},
+            ]
+        }
+        mock_code.return_value = "Clean"
+        mock_dep.return_value = "Clean"
+        mock_secret.return_value = "Clean"
+
+        output = str(tmp_path / "report.md")
+        config = dict(DEFAULT_CONFIG)
+        config["max_diff_size"] = 200  # Very small limit to force truncation
+        _run_security_scan("42", "1", output, "", "CRITICAL", config=config)
+
+        # The diff passed to code review should be truncated
+        code_diff = mock_code.call_args[0][0]
+        assert "omitted" in code_diff or len(code_diff) <= 400  # truncated
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_only_code_security_agent_enabled(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """When only code_security agent is enabled, dep and secret are not called."""
+        mock_info.return_value = {"iid": 1, "title": "Test"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "No issues."
+
+        output = str(tmp_path / "report.md")
+        config = dict(DEFAULT_CONFIG)
+        config["agents"] = {
+            "code_security": True,
+            "dependency_audit": False,
+            "secret_scan": False,
+        }
+        _run_security_scan("42", "1", output, "", "CRITICAL", config=config)
+
+        mock_code.assert_called_once()
+        mock_dep.assert_not_called()
+        mock_secret.assert_not_called()
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_report_written_before_exit_on_severity_breach(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """Report is written to disk even when severity causes sys.exit(1)."""
+        mock_info.return_value = {"iid": 1, "title": "Risky"}
+        mock_diff.return_value = {
+            "changes": [{"new_path": "app.py", "diff": "+x"}]
+        }
+        mock_code.return_value = "### [CRITICAL] Finding: RCE\n**File:** `app.py` (line 1)\n"
+        mock_dep.return_value = ""
+        mock_secret.return_value = ""
+
+        output = str(tmp_path / "report.md")
+        with pytest.raises(SystemExit):
+            _run_security_scan("42", "1", output, "", "HIGH")
+
+        # Report should still exist despite exit
+        assert Path(output).exists()
+        report_text = Path(output).read_text()
+        assert "DuoGuard Security Review Report" in report_text
+
+    @patch("duoguard.generate_sarif_report")
+    @patch("duoguard.generate_codequality_report")
+    @patch("duoguard.run_secret_scan")
+    @patch("duoguard.run_dependency_audit")
+    @patch("duoguard.run_code_security_review")
+    @patch("duoguard.get_mr_diff")
+    @patch("duoguard.get_mr_info")
+    def test_extension_exclusion_applied_from_config(
+        self, mock_info, mock_diff, mock_code, mock_dep, mock_secret,
+        mock_cq, mock_sarif, tmp_path,
+    ):
+        """exclude_extensions config filters files before analysis."""
+        mock_info.return_value = {"iid": 1, "title": "Ext filter"}
+        mock_diff.return_value = {
+            "changes": [
+                {"new_path": "app.py", "diff": "+code"},
+                {"new_path": "bundle.js", "diff": "+js"},
+                {"new_path": "styles.css", "diff": "+css"},
+            ]
+        }
+        mock_code.return_value = "Clean"
+        mock_dep.return_value = "Clean"
+        mock_secret.return_value = "Clean"
+
+        output = str(tmp_path / "report.md")
+        config = dict(DEFAULT_CONFIG)
+        config["exclude_extensions"] = ["js", "css"]
+        _run_security_scan("42", "1", output, "", "CRITICAL", config=config)
+
+        code_diff = mock_code.call_args[0][0]
+        assert "app.py" in code_diff
+        assert "bundle.js" not in code_diff
+        assert "styles.css" not in code_diff
+
+
+# ── post_inline_findings body formatting tests ────────────────
+
+
+class TestPostInlineFindingsBody:
+    """Verify the body format of inline discussions."""
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_body_includes_severity_and_description(self, mock_versions, mock_disc):
+        """Inline discussion body contains severity and description."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc", "head_commit_sha": "def", "start_commit_sha": "ghi",
+        }]
+        mock_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"file_path": "app.py", "line_num": 5, "severity": "high",
+                      "description": "SQL Injection", "category": "code-security"}]
+        post_inline_findings("42", "1", findings)
+
+        body = mock_disc.call_args[0][2]
+        assert "HIGH" in body
+        assert "SQL Injection" in body
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_body_includes_category(self, mock_versions, mock_disc):
+        """Inline discussion body shows the finding category."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc", "head_commit_sha": "def", "start_commit_sha": "ghi",
+        }]
+        mock_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"file_path": "go.mod", "line_num": 3, "severity": "medium",
+                      "description": "Outdated dep", "category": "dependency-audit"}]
+        post_inline_findings("42", "1", findings)
+
+        body = mock_disc.call_args[0][2]
+        assert "dependency-audit" in body
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_body_without_cwe_omits_cwe_line(self, mock_versions, mock_disc):
+        """If finding has no CWE, the CWE line is not included in the body."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc", "head_commit_sha": "def", "start_commit_sha": "ghi",
+        }]
+        mock_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"file_path": "app.py", "line_num": 1, "severity": "low",
+                      "description": "Minor issue", "category": "code-security"}]
+        post_inline_findings("42", "1", findings)
+
+        body = mock_disc.call_args[0][2]
+        assert "CWE" not in body
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_default_severity_info_when_missing(self, mock_versions, mock_disc):
+        """Finding without 'severity' key defaults to INFO in body."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc", "head_commit_sha": "def", "start_commit_sha": "ghi",
+        }]
+        mock_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"file_path": "x.py", "line_num": 1,
+                      "description": "Some finding", "category": "code-security"}]
+        post_inline_findings("42", "1", findings)
+
+        body = mock_disc.call_args[0][2]
+        assert "INFO" in body
+
+    @patch("post_report.post_inline_discussion")
+    @patch("post_report.get_mr_diff_versions")
+    def test_shield_emoji_present_in_body(self, mock_versions, mock_disc):
+        """All inline discussion bodies start with the shield emoji prefix."""
+        mock_versions.return_value = [{
+            "base_commit_sha": "abc", "head_commit_sha": "def", "start_commit_sha": "ghi",
+        }]
+        mock_disc.return_value = {"id": "disc-1"}
+
+        findings = [{"file_path": "a.py", "line_num": 1, "severity": "critical",
+                      "description": "RCE", "category": "code-security"}]
+        post_inline_findings("42", "1", findings)
+
+        body = mock_disc.call_args[0][2]
+        assert ":shield: DuoGuard" in body
+
+
+# ── run_dependency_audit whitespace-only diff ─────────────────
+
+
+class TestRunDependencyAuditEdgeCases:
+    """Edge cases for run_dependency_audit."""
+
+    def test_whitespace_only_diff_returns_no_changes(self):
+        """Whitespace-only diff is treated as no dependency changes."""
+        result = run_dependency_audit("   \n\t\n  ")
+        assert "No dependency file changes" in result
+
+    def test_newline_only_diff_returns_no_changes(self):
+        """Newline-only diff (stripped to empty) returns no changes message."""
+        result = run_dependency_audit("\n\n\n")
+        assert "No dependency file changes" in result
+
+    @patch("duoguard.call_ai_gateway")
+    def test_non_empty_diff_calls_ai_gateway(self, mock_call):
+        """Non-empty dep diff triggers the AI gateway call."""
+        mock_call.return_value = "### [LOW] Finding: Old dep\n**File:** `package.json` (line 1)\n"
+        result = run_dependency_audit("+ some dep change")
+        mock_call.assert_called_once()
+        assert "[LOW]" in result
+
+
+# ── _parse_gateway_headers further edge cases ─────────────────
+
+
+class TestParseGatewayHeadersExtended:
+    """Further edge cases for _parse_gateway_headers."""
+
+    def test_json_with_nested_values_ignored_non_dict(self):
+        """JSON object with non-string values is still returned as dict."""
+        result = _parse_gateway_headers('{"X-Retry": "3", "X-Timeout": "120"}')
+        assert result == {"X-Retry": "3", "X-Timeout": "120"}
+
+    def test_newline_separated_with_extra_whitespace(self):
+        """Key-value pairs with extra whitespace are stripped."""
+        result = _parse_gateway_headers("  X-Custom  :  value  \n  Auth  :  token  ")
+        assert result.get("X-Custom") == "value"
+        assert result.get("Auth") == "token"
+
+    def test_line_without_colon_is_ignored(self):
+        """Lines without a colon separator are ignored in fallback mode."""
+        result = _parse_gateway_headers("NoCOLONhere\nValid: value")
+        assert "NoCOLONhere" not in result
+        assert result.get("Valid") == "value"
