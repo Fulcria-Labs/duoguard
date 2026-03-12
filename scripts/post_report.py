@@ -307,6 +307,96 @@ def unapprove_mr(project_id: str, mr_iid: str) -> bool:
         return False
 
 
+# ── GitLab issue creation ─────────────────────────────────────
+
+
+def create_issue_for_finding(
+    project_id: str,
+    mr_iid: str,
+    finding: dict,
+) -> dict | None:
+    """Create a GitLab issue for a security finding.
+
+    Issues are created with security labels and linked back to the MR.
+    Only findings with severity ``critical`` or ``high`` should trigger
+    issue creation.
+
+    Returns the created issue dict on success, or None on failure.
+    """
+    severity = finding.get("severity", "info").upper()
+    description = finding.get("description", "Security finding")
+    file_path = finding.get("file_path", "unknown")
+    line_num = finding.get("line_num", 1)
+    category = finding.get("category", "code-security")
+    cwe = finding.get("cwe", "")
+    owasp = finding.get("owasp", "")
+
+    title = f"[DuoGuard {severity}] {description}"
+    if len(title) > 255:
+        title = title[:252] + "..."
+
+    body_parts = [
+        f"## Security Finding from DuoGuard",
+        f"",
+        f"**Severity:** {severity}",
+        f"**Category:** {category}",
+        f"**File:** `{file_path}` (line {line_num})",
+        f"**Source MR:** !{mr_iid}",
+    ]
+    if cwe:
+        body_parts.append(f"**CWE:** [{cwe}](https://cwe.mitre.org/data/definitions/{cwe.split('-')[-1]}.html)")
+    if owasp:
+        body_parts.append(f"**OWASP:** {owasp}")
+
+    body_parts.extend([
+        "",
+        "---",
+        f"*Auto-created by DuoGuard security review of MR !{mr_iid}.*",
+    ])
+
+    url = f"{GITLAB_API_URL}/projects/{project_id}/issues"
+    labels = [f"security::{severity.lower()}", "DuoGuard", "security"]
+    payload = {
+        "title": title,
+        "description": "\n".join(body_parts),
+        "labels": ",".join(labels),
+    }
+
+    try:
+        resp = requests.post(url, headers=_headers(), json=payload, timeout=30)
+        resp.raise_for_status()
+        issue = resp.json()
+        print(f"  Issue #{issue.get('iid')} created: {title[:60]}...")
+        return issue
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "?"
+        print(f"  WARNING: Could not create issue (HTTP {status})")
+        return None
+
+
+def create_issues_for_findings(
+    project_id: str,
+    mr_iid: str,
+    findings: list[dict],
+    min_severity: str = "high",
+) -> list[dict]:
+    """Create GitLab issues for findings at or above the given severity.
+
+    Returns a list of created issue dicts.
+    """
+    severity_order = ["info", "low", "medium", "high", "critical"]
+    min_idx = severity_order.index(min_severity.lower()) if min_severity.lower() in severity_order else 3
+    created = []
+    for f in findings:
+        sev = f.get("severity", "info").lower()
+        sev_idx = severity_order.index(sev) if sev in severity_order else 0
+        if sev_idx >= min_idx:
+            issue = create_issue_for_finding(project_id, mr_iid, f)
+            if issue:
+                created.append(issue)
+    return created
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 
@@ -324,6 +414,11 @@ def main():
     parser.add_argument("--approve-threshold", default="HIGH",
                         choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE"],
                         help="Max severity to auto-approve (default: HIGH)")
+    parser.add_argument("--create-issues", action="store_true",
+                        help="Create GitLab issues for high/critical findings")
+    parser.add_argument("--issue-min-severity", default="high",
+                        choices=["critical", "high", "medium", "low"],
+                        help="Minimum severity to create issues (default: high)")
     args = parser.parse_args()
 
     report_path = Path(args.report_file)
@@ -366,7 +461,19 @@ def main():
     elif args.severity == "NONE":
         update_mr_labels(args.project_id, args.mr_iid, "NONE")
 
-    # Step 4: MR approval based on severity
+    # Step 4: Create GitLab issues for critical/high findings
+    if args.create_issues and args.findings_file:
+        findings_path = Path(args.findings_file)
+        if findings_path.exists():
+            findings = json.loads(findings_path.read_text())
+            if findings:
+                created = create_issues_for_findings(
+                    args.project_id, args.mr_iid, findings,
+                    min_severity=args.issue_min_severity,
+                )
+                print(f"  Created {len(created)} issue(s) for security findings.")
+
+    # Step 5: MR approval based on severity
     if args.approve:
         severity_order = ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
         sev_idx = severity_order.index(args.severity) if args.severity in severity_order else 0

@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from duoguard import (
+    CWE_KEYWORD_MAP,
     DEFAULT_CONFIG,
     MAX_DIFF_SIZE,
     _count_by_severity,
@@ -20,8 +21,10 @@ from duoguard import (
     _resolve_api_url_for_agent,
     _run_security_scan,
     call_ai_gateway,
+    compute_diff_complexity,
     count_findings,
     determine_severity,
+    enrich_finding_cwe,
     export_findings_json,
     extract_dependency_files,
     filter_excluded_changes,
@@ -39,6 +42,8 @@ from duoguard import (
 from post_report import (
     SECURITY_LABELS,
     approve_mr,
+    create_issue_for_finding,
+    create_issues_for_findings,
     find_existing_comment,
     get_mr_diff_versions,
     post_inline_discussion,
@@ -2258,3 +2263,496 @@ class TestCreateSession:
         assert 502 in retry.status_forcelist
         assert 503 in retry.status_forcelist
         assert 504 in retry.status_forcelist
+
+
+# ── CWE / OWASP enrichment tests ─────────────────────────────
+
+
+class TestCWEKeywordMap:
+    """Verify the CWE keyword map structure and coverage."""
+
+    def test_map_is_non_empty(self):
+        assert len(CWE_KEYWORD_MAP) > 0
+
+    def test_all_entries_have_cwe_and_owasp(self):
+        for keyword, classification in CWE_KEYWORD_MAP.items():
+            assert "cwe" in classification, f"Missing CWE for {keyword}"
+            assert "owasp" in classification, f"Missing OWASP for {keyword}"
+
+    def test_cwe_format(self):
+        for keyword, classification in CWE_KEYWORD_MAP.items():
+            assert classification["cwe"].startswith("CWE-"), f"Bad CWE format for {keyword}"
+
+    def test_owasp_format(self):
+        for keyword, classification in CWE_KEYWORD_MAP.items():
+            assert classification["owasp"].startswith("A"), f"Bad OWASP format for {keyword}"
+            assert ":2021-" in classification["owasp"], f"Not OWASP 2021 for {keyword}"
+
+    def test_covers_owasp_top_10(self):
+        """Verify we have coverage for all OWASP Top 10 (2021) categories."""
+        owasp_categories = set()
+        for classification in CWE_KEYWORD_MAP.values():
+            cat = classification["owasp"].split("-")[0]  # e.g. "A03:2021"
+            owasp_categories.add(cat)
+        # Should cover most of the OWASP Top 10
+        assert len(owasp_categories) >= 8
+
+    def test_sql_injection_mapping(self):
+        assert CWE_KEYWORD_MAP["sql injection"]["cwe"] == "CWE-89"
+        assert "Injection" in CWE_KEYWORD_MAP["sql injection"]["owasp"]
+
+    def test_xss_mapping(self):
+        assert CWE_KEYWORD_MAP["xss"]["cwe"] == "CWE-79"
+
+    def test_ssrf_mapping(self):
+        assert CWE_KEYWORD_MAP["ssrf"]["cwe"] == "CWE-918"
+        assert "SSRF" in CWE_KEYWORD_MAP["ssrf"]["owasp"]
+
+    def test_hardcoded_password_mapping(self):
+        assert CWE_KEYWORD_MAP["hardcoded password"]["cwe"] == "CWE-798"
+
+    def test_path_traversal_mapping(self):
+        assert CWE_KEYWORD_MAP["path traversal"]["cwe"] == "CWE-22"
+
+
+class TestEnrichFindingCWE:
+    """Tests for CWE/OWASP enrichment of findings."""
+
+    def test_enriches_sql_injection(self):
+        finding = {"description": "SQL Injection via string concatenation", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-89"
+        assert "Injection" in result["owasp"]
+
+    def test_enriches_xss(self):
+        finding = {"description": "Reflected XSS in search parameter", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-79"
+
+    def test_enriches_command_injection(self):
+        finding = {"description": "Command injection via user input", "severity": "critical"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-78"
+
+    def test_enriches_ssrf(self):
+        finding = {"description": "SSRF via URL parameter", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-918"
+
+    def test_enriches_hardcoded_secret(self):
+        finding = {"description": "Hardcoded secret in config", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-798"
+
+    def test_preserves_existing_cwe(self):
+        finding = {"description": "SQL Injection", "cwe": "CWE-999", "owasp": "A99:Custom"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-999"
+        assert result["owasp"] == "A99:Custom"
+
+    def test_no_match_leaves_finding_unchanged(self):
+        finding = {"description": "Something unrelated", "severity": "low"}
+        result = enrich_finding_cwe(finding)
+        assert "cwe" not in result
+        assert "owasp" not in result
+
+    def test_case_insensitive(self):
+        finding = {"description": "SQL INJECTION in query", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-89"
+
+    def test_enriches_open_redirect(self):
+        finding = {"description": "Open redirect in login flow", "severity": "medium"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-601"
+
+    def test_enriches_prototype_pollution(self):
+        finding = {"description": "Prototype pollution via merge", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-1321"
+
+    def test_enriches_deserialization(self):
+        finding = {"description": "Insecure deserialization of user data", "severity": "critical"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-502"
+
+    def test_partial_existing_cwe_fills_owasp(self):
+        finding = {"description": "SQL Injection", "cwe": "CWE-89"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-89"
+        assert "owasp" in result
+
+    def test_enriches_regex_dos(self):
+        finding = {"description": "ReDoS in email validation", "severity": "medium"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-1333"
+
+    def test_enriches_file_upload(self):
+        finding = {"description": "Unrestricted upload of dangerous file type", "severity": "high"}
+        result = enrich_finding_cwe(finding)
+        assert result["cwe"] == "CWE-434"
+
+
+class TestParseFindings_CWE:
+    """Test that _parse_findings now enriches with CWE/OWASP."""
+
+    def test_sql_injection_finding_gets_cwe(self):
+        text = "### [HIGH] Finding: SQL Injection via concatenation\n**File:** `app.py` (line 10)\n"
+        findings = _parse_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["cwe"] == "CWE-89"
+        assert "Injection" in findings[0]["owasp"]
+
+    def test_xss_finding_gets_cwe(self):
+        text = "### [HIGH] Finding: Reflected XSS in search\n**File:** `views.py` (line 25)\n"
+        findings = _parse_findings(text)
+        assert findings[0]["cwe"] == "CWE-79"
+
+    def test_secret_finding_gets_cwe(self):
+        text = "### [HIGH] Finding: Hardcoded API key in config\n**File:** `config.py` (line 5)\n"
+        findings = _parse_findings(text, category="secret-scan")
+        assert findings[0]["cwe"] == "CWE-798"
+        assert findings[0]["category"] == "secret-scan"
+
+    def test_unknown_finding_no_cwe(self):
+        text = "### [LOW] Finding: Minor style issue\n**File:** `style.py` (line 1)\n"
+        findings = _parse_findings(text)
+        assert "cwe" not in findings[0] or findings[0].get("cwe") is None
+
+
+# ── Diff complexity tests ─────────────────────────────────────
+
+
+class TestDiffComplexity:
+    """Tests for diff complexity scoring."""
+
+    def test_empty_changes(self):
+        result = compute_diff_complexity([])
+        assert result["total_additions"] == 0
+        assert result["total_deletions"] == 0
+        assert result["total_files"] == 0
+        assert result["complexity_score"] == 0
+        assert result["high_risk_files"] == []
+        assert result["risk_factors"] == []
+
+    def test_simple_addition(self):
+        changes = [{"new_path": "hello.py", "diff": "\n+print('hello')\n+print('world')"}]
+        result = compute_diff_complexity(changes)
+        assert result["total_additions"] >= 1
+        assert result["total_files"] == 1
+
+    def test_detects_password_handling(self):
+        changes = [{"new_path": "auth.py", "diff": "\n+password = request.form['password']"}]
+        result = compute_diff_complexity(changes)
+        assert "auth.py" in result["high_risk_files"]
+        assert any("credential" in f for f in result["risk_factors"])
+
+    def test_detects_exec_calls(self):
+        changes = [{"new_path": "run.py", "diff": "\n+subprocess.call(cmd)"}]
+        result = compute_diff_complexity(changes)
+        assert "run.py" in result["high_risk_files"]
+        assert any("command execution" in f for f in result["risk_factors"])
+
+    def test_detects_sql_operations(self):
+        changes = [{"new_path": "db.py", "diff": "\n+cursor.execute(query)"}]
+        result = compute_diff_complexity(changes)
+        assert "db.py" in result["high_risk_files"]
+
+    def test_detects_auth_changes(self):
+        changes = [{"new_path": "login.py", "diff": "\n+session['user'] = authenticated_user"}]
+        result = compute_diff_complexity(changes)
+        assert "login.py" in result["high_risk_files"]
+
+    def test_detects_crypto_operations(self):
+        changes = [{"new_path": "crypto.py", "diff": "\n+encrypted = encrypt(data, key)"}]
+        result = compute_diff_complexity(changes)
+        assert "crypto.py" in result["high_risk_files"]
+
+    def test_complexity_score_increases_with_size(self):
+        small = [{"new_path": "a.py", "diff": "\n+x = 1"}]
+        large_diff = "\n".join([f"\n+line_{i} = {i}" for i in range(200)])
+        large = [{"new_path": "b.py", "diff": large_diff}]
+        small_score = compute_diff_complexity(small)["complexity_score"]
+        large_score = compute_diff_complexity(large)["complexity_score"]
+        assert large_score > small_score
+
+    def test_complexity_score_increases_with_files(self):
+        one_file = [{"new_path": "a.py", "diff": "\n+x = 1"}]
+        five_files = [{"new_path": f"{c}.py", "diff": "\n+x = 1"} for c in "abcde"]
+        one_score = compute_diff_complexity(one_file)["complexity_score"]
+        five_score = compute_diff_complexity(five_files)["complexity_score"]
+        assert five_score > one_score
+
+    def test_complexity_score_capped_at_100(self):
+        huge_diff = "\n".join([f"\n+password_{i} = exec(query_{i})" for i in range(500)])
+        changes = [{"new_path": f"f{i}.py", "diff": huge_diff} for i in range(20)]
+        result = compute_diff_complexity(changes)
+        assert result["complexity_score"] <= 100
+
+    def test_skips_empty_diffs(self):
+        changes = [{"new_path": "empty.py", "diff": ""}]
+        result = compute_diff_complexity(changes)
+        assert result["total_additions"] == 0
+        assert result["total_deletions"] == 0
+
+    def test_multiple_risk_files(self):
+        changes = [
+            {"new_path": "auth.py", "diff": "\n+password = get_password()"},
+            {"new_path": "db.py", "diff": "\n+cursor.execute(sql)"},
+            {"new_path": "safe.py", "diff": "\n+x = 1 + 2"},
+        ]
+        result = compute_diff_complexity(changes)
+        assert len(result["high_risk_files"]) == 2
+        assert "safe.py" not in result["high_risk_files"]
+
+    def test_returns_expected_keys(self):
+        result = compute_diff_complexity([])
+        expected_keys = {"total_additions", "total_deletions", "total_files",
+                         "high_risk_files", "complexity_score", "risk_factors"}
+        assert set(result.keys()) == expected_keys
+
+    def test_deletions_counted(self):
+        changes = [{"new_path": "a.py", "diff": "\n-old_line_1\n-old_line_2\n+new_line"}]
+        result = compute_diff_complexity(changes)
+        assert result["total_deletions"] >= 1
+
+    def test_detects_url_handling(self):
+        changes = [{"new_path": "api.py", "diff": "\n+redirect_url = request.args['redirect']"}]
+        result = compute_diff_complexity(changes)
+        assert "api.py" in result["high_risk_files"]
+
+    def test_detects_file_operations(self):
+        changes = [{"new_path": "io.py", "diff": "\n+upload_file(path)"}]
+        result = compute_diff_complexity(changes)
+        assert "io.py" in result["high_risk_files"]
+
+    def test_risk_factors_no_duplicates(self):
+        changes = [
+            {"new_path": "a.py", "diff": "\n+password = x\n+secret = y\n+token = z"},
+        ]
+        result = compute_diff_complexity(changes)
+        # Should only have one risk factor entry per file
+        file_factors = [f for f in result["risk_factors"] if "a.py" in f]
+        assert len(file_factors) == 1
+
+
+class TestReportComplexity:
+    """Test that generate_report includes complexity analysis."""
+
+    def test_report_includes_complexity_section(self):
+        mr_info = {"iid": 1, "title": "Test MR"}
+        complexity = {
+            "total_additions": 50,
+            "total_deletions": 10,
+            "total_files": 3,
+            "high_risk_files": ["auth.py"],
+            "complexity_score": 45,
+            "risk_factors": ["authentication logic modified in auth.py"],
+        }
+        report = generate_report(mr_info, "", "", "", complexity=complexity)
+        assert "Diff Complexity Analysis" in report
+        assert "45/100" in report
+        assert "Medium" in report
+        assert "auth.py" in report
+
+    def test_report_skips_complexity_when_zero(self):
+        mr_info = {"iid": 1, "title": "Test MR"}
+        complexity = {
+            "total_additions": 0, "total_deletions": 0, "total_files": 0,
+            "high_risk_files": [], "complexity_score": 0, "risk_factors": [],
+        }
+        report = generate_report(mr_info, "", "", "", complexity=complexity)
+        assert "Diff Complexity Analysis" not in report
+
+    def test_report_shows_low_risk(self):
+        mr_info = {"iid": 1, "title": "Test MR"}
+        complexity = {
+            "total_additions": 5, "total_deletions": 0, "total_files": 1,
+            "high_risk_files": [], "complexity_score": 2, "risk_factors": [],
+        }
+        report = generate_report(mr_info, "", "", "", complexity=complexity)
+        assert "Low" in report
+
+    def test_report_shows_high_risk(self):
+        mr_info = {"iid": 1, "title": "Test MR"}
+        complexity = {
+            "total_additions": 500, "total_deletions": 200, "total_files": 10,
+            "high_risk_files": ["a.py", "b.py", "c.py", "d.py"],
+            "complexity_score": 80,
+            "risk_factors": ["database operations modified in a.py"],
+        }
+        report = generate_report(mr_info, "", "", "", complexity=complexity)
+        assert "High" in report
+        assert "80/100" in report
+
+    def test_report_without_complexity(self):
+        mr_info = {"iid": 1, "title": "Test MR"}
+        report = generate_report(mr_info, "", "", "")
+        assert "Diff Complexity Analysis" not in report
+
+
+# ── SARIF CWE enrichment tests ───────────────────────────────
+
+
+class TestSarifCWE:
+    """Test SARIF reports include CWE/OWASP properties."""
+
+    def test_sarif_includes_cwe_property(self, tmp_path):
+        code = "### [HIGH] Finding: SQL Injection in query\n**File:** `db.py` (line 10)\n"
+        output = str(tmp_path / "sarif.json")
+        generate_sarif_report(code, output)
+        with open(output) as f:
+            sarif = json.load(f)
+        rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+        assert len(rules) >= 1
+        assert rules[0]["properties"]["cwe"] == "CWE-89"
+
+    def test_sarif_includes_owasp_property(self, tmp_path):
+        code = "### [HIGH] Finding: SSRF via user URL\n**File:** `api.py` (line 5)\n"
+        output = str(tmp_path / "sarif.json")
+        generate_sarif_report(code, output)
+        with open(output) as f:
+            sarif = json.load(f)
+        rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+        assert "owasp" in rules[0]["properties"]
+        assert "SSRF" in rules[0]["properties"]["owasp"]
+
+    def test_sarif_no_cwe_for_unknown(self, tmp_path):
+        code = "### [LOW] Finding: Minor style issue\n**File:** `style.py` (line 1)\n"
+        output = str(tmp_path / "sarif.json")
+        generate_sarif_report(code, output)
+        with open(output) as f:
+            sarif = json.load(f)
+        rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+        assert "cwe" not in rules[0]["properties"]
+
+
+# ── GitLab issue creation tests ──────────────────────────────
+
+
+class TestCreateIssueForFinding:
+    """Tests for creating GitLab issues from findings."""
+
+    @patch("post_report.requests.post")
+    def test_creates_issue_with_correct_payload(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 42, "title": "test"}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {
+            "severity": "critical",
+            "description": "SQL Injection in query",
+            "file_path": "db.py",
+            "line_num": 10,
+            "category": "code-security",
+            "cwe": "CWE-89",
+            "owasp": "A03:2021-Injection",
+        }
+        result = create_issue_for_finding("123", "5", finding)
+        assert result is not None
+        assert result["iid"] == 42
+        # Verify the POST was called
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+        assert "SQL Injection" in payload["title"]
+        assert "DuoGuard" in payload["labels"]
+
+    @patch("post_report.requests.post")
+    def test_returns_none_on_http_error(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(response=mock_resp)
+        mock_post.return_value = mock_resp
+
+        finding = {"severity": "high", "description": "Test", "file_path": "a.py"}
+        result = create_issue_for_finding("123", "5", finding)
+        assert result is None
+
+    @patch("post_report.requests.post")
+    def test_issue_includes_cwe_link(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 10}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {
+            "severity": "high", "description": "XSS", "file_path": "view.py",
+            "line_num": 5, "category": "code-security", "cwe": "CWE-79",
+        }
+        create_issue_for_finding("123", "5", finding)
+        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
+        assert "CWE-79" in payload["description"]
+        assert "cwe.mitre.org" in payload["description"]
+
+    @patch("post_report.requests.post")
+    def test_title_truncation(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"iid": 1}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        finding = {
+            "severity": "critical",
+            "description": "A" * 300,
+            "file_path": "x.py",
+        }
+        create_issue_for_finding("123", "5", finding)
+        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
+        assert len(payload["title"]) <= 255
+
+
+class TestCreateIssuesForFindings:
+    """Tests for batch issue creation with severity filtering."""
+
+    @patch("post_report.create_issue_for_finding")
+    def test_only_creates_for_high_and_above(self, mock_create):
+        mock_create.return_value = {"iid": 1}
+        findings = [
+            {"severity": "critical", "description": "RCE"},
+            {"severity": "high", "description": "SQLi"},
+            {"severity": "medium", "description": "XSS"},
+            {"severity": "low", "description": "Info leak"},
+        ]
+        result = create_issues_for_findings("123", "5", findings, min_severity="high")
+        assert len(result) == 2
+        assert mock_create.call_count == 2
+
+    @patch("post_report.create_issue_for_finding")
+    def test_creates_for_medium_when_threshold_lowered(self, mock_create):
+        mock_create.return_value = {"iid": 1}
+        findings = [
+            {"severity": "high", "description": "SQLi"},
+            {"severity": "medium", "description": "XSS"},
+            {"severity": "low", "description": "Info"},
+        ]
+        result = create_issues_for_findings("123", "5", findings, min_severity="medium")
+        assert len(result) == 2
+
+    @patch("post_report.create_issue_for_finding")
+    def test_empty_findings_returns_empty(self, mock_create):
+        result = create_issues_for_findings("123", "5", [], min_severity="high")
+        assert result == []
+        mock_create.assert_not_called()
+
+    @patch("post_report.create_issue_for_finding")
+    def test_skips_failed_creations(self, mock_create):
+        mock_create.side_effect = [{"iid": 1}, None, {"iid": 3}]
+        findings = [
+            {"severity": "critical", "description": "A"},
+            {"severity": "critical", "description": "B"},
+            {"severity": "critical", "description": "C"},
+        ]
+        result = create_issues_for_findings("123", "5", findings, min_severity="high")
+        assert len(result) == 2
+
+    @patch("post_report.create_issue_for_finding")
+    def test_critical_only_threshold(self, mock_create):
+        mock_create.return_value = {"iid": 1}
+        findings = [
+            {"severity": "critical", "description": "RCE"},
+            {"severity": "high", "description": "SQLi"},
+        ]
+        result = create_issues_for_findings("123", "5", findings, min_severity="critical")
+        assert len(result) == 1

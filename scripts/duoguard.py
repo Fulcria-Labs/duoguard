@@ -455,6 +455,147 @@ def run_secret_scan(diff_text: str) -> str:
     return call_ai_gateway(prompt, user_msg)
 
 
+# ── CWE / OWASP enrichment ────────────────────────────────────
+
+# Map common vulnerability keywords to CWE IDs and OWASP Top 10 (2021) categories
+CWE_KEYWORD_MAP: dict[str, dict] = {
+    "sql injection": {"cwe": "CWE-89", "owasp": "A03:2021-Injection"},
+    "xss": {"cwe": "CWE-79", "owasp": "A03:2021-Injection"},
+    "cross-site scripting": {"cwe": "CWE-79", "owasp": "A03:2021-Injection"},
+    "command injection": {"cwe": "CWE-78", "owasp": "A03:2021-Injection"},
+    "os command": {"cwe": "CWE-78", "owasp": "A03:2021-Injection"},
+    "path traversal": {"cwe": "CWE-22", "owasp": "A01:2021-Broken Access Control"},
+    "directory traversal": {"cwe": "CWE-22", "owasp": "A01:2021-Broken Access Control"},
+    "ssrf": {"cwe": "CWE-918", "owasp": "A10:2021-SSRF"},
+    "server-side request forgery": {"cwe": "CWE-918", "owasp": "A10:2021-SSRF"},
+    "deserialization": {"cwe": "CWE-502", "owasp": "A08:2021-Software and Data Integrity Failures"},
+    "xml external entity": {"cwe": "CWE-611", "owasp": "A05:2021-Security Misconfiguration"},
+    "xxe": {"cwe": "CWE-611", "owasp": "A05:2021-Security Misconfiguration"},
+    "broken auth": {"cwe": "CWE-287", "owasp": "A07:2021-Identification and Authentication Failures"},
+    "authentication bypass": {"cwe": "CWE-287", "owasp": "A07:2021-Identification and Authentication Failures"},
+    "hardcoded password": {"cwe": "CWE-798", "owasp": "A07:2021-Identification and Authentication Failures"},
+    "hardcoded secret": {"cwe": "CWE-798", "owasp": "A07:2021-Identification and Authentication Failures"},
+    "hardcoded credential": {"cwe": "CWE-798", "owasp": "A07:2021-Identification and Authentication Failures"},
+    "api key": {"cwe": "CWE-798", "owasp": "A07:2021-Identification and Authentication Failures"},
+    "private key": {"cwe": "CWE-321", "owasp": "A02:2021-Cryptographic Failures"},
+    "weak crypto": {"cwe": "CWE-327", "owasp": "A02:2021-Cryptographic Failures"},
+    "insecure random": {"cwe": "CWE-330", "owasp": "A02:2021-Cryptographic Failures"},
+    "open redirect": {"cwe": "CWE-601", "owasp": "A01:2021-Broken Access Control"},
+    "csrf": {"cwe": "CWE-352", "owasp": "A01:2021-Broken Access Control"},
+    "race condition": {"cwe": "CWE-362", "owasp": "A04:2021-Insecure Design"},
+    "buffer overflow": {"cwe": "CWE-120", "owasp": "A06:2021-Vulnerable and Outdated Components"},
+    "integer overflow": {"cwe": "CWE-190", "owasp": "A06:2021-Vulnerable and Outdated Components"},
+    "missing access control": {"cwe": "CWE-862", "owasp": "A01:2021-Broken Access Control"},
+    "idor": {"cwe": "CWE-639", "owasp": "A01:2021-Broken Access Control"},
+    "insecure direct object": {"cwe": "CWE-639", "owasp": "A01:2021-Broken Access Control"},
+    "log injection": {"cwe": "CWE-117", "owasp": "A09:2021-Security Logging and Monitoring Failures"},
+    "information disclosure": {"cwe": "CWE-200", "owasp": "A01:2021-Broken Access Control"},
+    "sensitive data exposure": {"cwe": "CWE-200", "owasp": "A02:2021-Cryptographic Failures"},
+    "ldap injection": {"cwe": "CWE-90", "owasp": "A03:2021-Injection"},
+    "xml injection": {"cwe": "CWE-91", "owasp": "A03:2021-Injection"},
+    "code injection": {"cwe": "CWE-94", "owasp": "A03:2021-Injection"},
+    "eval": {"cwe": "CWE-95", "owasp": "A03:2021-Injection"},
+    "prototype pollution": {"cwe": "CWE-1321", "owasp": "A03:2021-Injection"},
+    "mass assignment": {"cwe": "CWE-915", "owasp": "A04:2021-Insecure Design"},
+    "unrestricted upload": {"cwe": "CWE-434", "owasp": "A04:2021-Insecure Design"},
+    "file upload": {"cwe": "CWE-434", "owasp": "A04:2021-Insecure Design"},
+    "denial of service": {"cwe": "CWE-400", "owasp": "A06:2021-Vulnerable and Outdated Components"},
+    "regex dos": {"cwe": "CWE-1333", "owasp": "A06:2021-Vulnerable and Outdated Components"},
+    "redos": {"cwe": "CWE-1333", "owasp": "A06:2021-Vulnerable and Outdated Components"},
+}
+
+
+def enrich_finding_cwe(finding: dict) -> dict:
+    """Enrich a finding dict with CWE and OWASP classification based on description.
+
+    If the finding already has a 'cwe' key (from AI output), it is preserved.
+    Otherwise, the description is matched against ``CWE_KEYWORD_MAP``.
+    """
+    desc_lower = finding.get("description", "").lower()
+
+    # If AI already provided a CWE, keep it
+    if finding.get("cwe") and finding.get("owasp"):
+        return finding
+
+    for keyword, classification in CWE_KEYWORD_MAP.items():
+        if keyword in desc_lower:
+            if not finding.get("cwe"):
+                finding["cwe"] = classification["cwe"]
+            if not finding.get("owasp"):
+                finding["owasp"] = classification["owasp"]
+            return finding
+
+    return finding
+
+
+# ── Diff complexity analysis ──────────────────────────────────
+
+def compute_diff_complexity(changes: list[dict]) -> dict:
+    """Compute complexity metrics for a set of MR changes.
+
+    Returns a dict with:
+      - total_additions: number of added lines
+      - total_deletions: number of deleted lines
+      - total_files: number of changed files
+      - high_risk_files: files with security-sensitive patterns
+      - complexity_score: weighted score (0-100) indicating review priority
+      - risk_factors: list of human-readable risk explanations
+    """
+    total_add = 0
+    total_del = 0
+    high_risk_files: list[str] = []
+    risk_factors: list[str] = []
+
+    # Patterns that indicate security-sensitive changes
+    security_patterns = [
+        (r'(?:password|secret|token|api_?key|credential)', "credential handling"),
+        (r'(?:exec|eval|system|popen|subprocess)', "command execution"),
+        (r'(?:sql|query|execute|cursor)', "database operations"),
+        (r'(?:auth|login|session|jwt|oauth)', "authentication logic"),
+        (r'(?:crypto|encrypt|decrypt|hash|hmac)', "cryptographic operations"),
+        (r'(?:permission|role|acl|rbac|policy)', "access control"),
+        (r'(?:deserializ|unpickle|yaml\.load|json\.loads)', "deserialization"),
+        (r'(?:redirect|url|href|src=)', "URL handling"),
+        (r'(?:upload|file|path|directory)', "file operations"),
+        (r'(?:cookie|header|request|response)', "HTTP handling"),
+    ]
+
+    for change in changes:
+        path = change.get("new_path", change.get("old_path", "unknown"))
+        diff = change.get("diff", "")
+        if not diff:
+            continue
+
+        file_additions = diff.count("\n+") - diff.count("\n+++")
+        file_deletions = diff.count("\n-") - diff.count("\n---")
+        total_add += max(0, file_additions)
+        total_del += max(0, file_deletions)
+
+        diff_lower = diff.lower()
+        for pattern, label in security_patterns:
+            if re.search(pattern, diff_lower):
+                if path not in high_risk_files:
+                    high_risk_files.append(path)
+                factor = f"{label} modified in {path}"
+                if factor not in risk_factors:
+                    risk_factors.append(factor)
+                break  # one match per file is enough
+
+    # Compute weighted complexity score (0-100)
+    size_score = min(40, (total_add + total_del) // 10)  # up to 40 for size
+    file_score = min(20, len(changes) * 2)  # up to 20 for file count
+    risk_score = min(40, len(high_risk_files) * 10)  # up to 40 for security risk
+
+    return {
+        "total_additions": total_add,
+        "total_deletions": total_del,
+        "total_files": len(changes),
+        "high_risk_files": high_risk_files,
+        "complexity_score": min(100, size_score + file_score + risk_score),
+        "risk_factors": risk_factors,
+    }
+
+
 def _count_by_severity(text: str) -> dict[str, int]:
     """Count findings per severity level using strict pattern matching.
 
@@ -538,6 +679,8 @@ def _parse_findings(text: str, category: str = "code-security") -> list[dict]:
                         )
                     except (ValueError, IndexError):
                         pass
+                # Enrich with CWE/OWASP classification
+                current = enrich_finding_cwe(current)
                 findings.append(current)
                 current = None
 
@@ -599,6 +742,7 @@ def generate_report(
     secret_findings: str,
     scan_duration: float | None = None,
     files_scanned: int = 0,
+    complexity: dict | None = None,
 ) -> str:
     """Generate the final security review report."""
     severity = determine_severity(code_findings, dep_findings, secret_findings)
@@ -645,6 +789,24 @@ def generate_report(
 
 **Overall Risk Level:** {severity_emoji.get(severity, '')} **{severity}**
 """
+
+    # Add complexity analysis if available
+    if complexity and complexity.get("complexity_score", 0) > 0:
+        score = complexity["complexity_score"]
+        risk_level = "Low" if score < 30 else "Medium" if score < 60 else "High"
+        report += f"\n### Diff Complexity Analysis\n\n"
+        report += f"**Complexity Score:** {score}/100 ({risk_level} risk)\n\n"
+        report += "| Metric | Value |\n|--------|-------|\n"
+        report += f"| Lines added | {complexity.get('total_additions', 0)} |\n"
+        report += f"| Lines deleted | {complexity.get('total_deletions', 0)} |\n"
+        report += f"| Files changed | {complexity.get('total_files', 0)} |\n"
+        report += f"| Security-sensitive files | {len(complexity.get('high_risk_files', []))} |\n"
+        report += "\n"
+        if complexity.get("risk_factors"):
+            report += "**Risk factors:**\n"
+            for factor in complexity["risk_factors"]:
+                report += f"- {factor}\n"
+            report += "\n"
 
     # Add scan metrics if available
     if scan_duration is not None or files_scanned > 0:
@@ -725,7 +887,7 @@ def generate_sarif_report(
 
         if rule_id not in rule_ids:
             help_uri = category_help.get(f["category"], "https://gitlab.devpost.com/")
-            rules.append({
+            rule_entry = {
                 "id": rule_id,
                 "shortDescription": {"text": f["description"]},
                 "fullDescription": {
@@ -735,7 +897,13 @@ def generate_sarif_report(
                 "helpUri": help_uri,
                 "defaultConfiguration": {"level": sarif_level},
                 "properties": {"category": f["category"]},
-            })
+            }
+            # Include CWE/OWASP in SARIF rule properties when available
+            if f.get("cwe"):
+                rule_entry["properties"]["cwe"] = f["cwe"]
+            if f.get("owasp"):
+                rule_entry["properties"]["owasp"] = f["owasp"]
+            rules.append(rule_entry)
             rule_ids.add(rule_id)
 
     run_id = str(uuid.uuid4())
@@ -898,11 +1066,18 @@ def _run_security_scan(project_id: str, mr_iid: str, output: str, sarif: str,
                 secret_findings = future.result()
                 print(f"       Secret Scan: {count_findings(secret_findings)} issue(s)")
 
+    # Compute diff complexity
+    complexity = compute_diff_complexity(changes)
+    if complexity["high_risk_files"]:
+        print(f"       Security-sensitive files: {', '.join(complexity['high_risk_files'][:5])}")
+    print(f"       Complexity score: {complexity['complexity_score']}/100")
+
     # Generate reports
     scan_duration = time.monotonic() - scan_start
     print("\n[3/5] Generating reports...")
     report = generate_report(mr_info, code_findings, dep_findings, secret_findings,
-                             scan_duration=scan_duration, files_scanned=len(changes))
+                             scan_duration=scan_duration, files_scanned=len(changes),
+                             complexity=complexity)
     Path(output).write_text(report)
     print(f"       Markdown report: {output}")
 

@@ -18,9 +18,12 @@ Results are posted as:
 - **Summary MR comment** with severity ratings, CWE classifications, and fix suggestions
 - **Inline diff discussions** anchored to the exact lines with findings
 - **MR security labels** (`security::critical`, `security::high`, `security::clean`, etc.)
-- **SARIF reports** for the GitLab Security Dashboard
+- **SARIF reports** for the GitLab Security Dashboard (with CWE/OWASP properties)
 - **Code Quality JSON** for the Code Quality widget
 - **Automated MR approval/rejection** based on configurable severity thresholds
+- **GitLab issues** auto-created for critical/high findings with CWE links
+- **Diff complexity analysis** — risk scoring and security-sensitive file detection
+- **CWE/OWASP enrichment** — automatic classification of findings against OWASP Top 10 (2021)
 - **Scan metrics** — files scanned, execution time in every report
 
 ## Why DuoGuard?
@@ -217,6 +220,9 @@ DuoGuard deeply integrates with the GitLab Duo Agent Platform:
 | **Discussion Dedup** | Resolves stale DuoGuard discussions before posting new ones |
 | **MR Labels** | Auto-applies `security::<severity>` labels via Labels API |
 | **MR Approval** | Auto-approve clean MRs, block risky ones via approval API |
+| **Issue Creation** | Auto-create GitLab issues for critical/high findings with CWE links |
+| **CWE/OWASP Enrichment** | Automatic classification against 40+ vulnerability patterns |
+| **Diff Complexity** | Risk scoring with security-sensitive file detection |
 | **AGENTS.md** | Repository-level customization for agent behavior |
 
 ## Project Structure
@@ -237,7 +243,7 @@ duoguard/
 │   └── post_report.py                        # MR comments, inline discussions, approval
 ├── docs/
 │   └── external-agent-config.yml             # Config to paste in GitLab UI
-├── tests/                                    # 134 tests
+├── tests/                                    # 270 tests
 ├── .gitlab-ci.yml                            # CI/CD pipeline
 ├── .duoguard.yml                             # Project configuration (optional)
 ├── AGENTS.md                                 # Agent customization
@@ -250,21 +256,22 @@ duoguard/
 ## Testing
 
 ```bash
-# Run all 134 tests
+# Run all 270 tests
 python -m pytest tests/ -v
 
 # Tests cover: diff formatting, dependency extraction, severity scoring,
 # report generation, SARIF/CodeQuality output, agent context parsing,
 # AI Gateway calls, Anthropic proxy, MR comment posting, inline discussions,
 # discussion deduplication, MR labels, scan metrics,
-# MR approval/unapproval, config loading, path exclusions, findings export
+# MR approval/unapproval, config loading, path exclusions, findings export,
+# CWE/OWASP enrichment, diff complexity analysis, GitLab issue creation
 ```
 
 ## Prize Categories
 
 - **Anthropic + GitLab Grand Prize** — Deep Claude integration: semantic security analysis, multi-agent orchestration, AI Gateway managed credentials
-- **Most Technically Impressive** — Flow Registry v1 flow, parallel multi-agent execution, dual-mode (CI/CD + agent trigger), SARIF + Code Quality + inline discussions + MR labels + MR approval + discussion deduplication + scan metrics, 134 tests
-- **Most Impactful** — Security automation that benefits every development team, zero-config with `injectGatewayToken`, configurable via `.duoguard.yml`
+- **Most Technically Impressive** — Flow Registry v1 flow, parallel multi-agent execution, dual-mode (CI/CD + agent trigger), SARIF + Code Quality + inline discussions + MR labels + MR approval + discussion deduplication + CWE/OWASP enrichment + diff complexity analysis + GitLab issue creation + scan metrics, 270 tests
+- **Most Impactful** — Security automation that benefits every development team, zero-config with `injectGatewayToken`, configurable via `.duoguard.yml`, OWASP Top 10 coverage
 
 ## License
 
