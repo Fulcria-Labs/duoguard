@@ -1,9 +1,27 @@
 stages:
+  - test
   - security-review
   - report
 
 variables:
   DUOGUARD_REPORT_FILE: duoguard-report.md
+
+# Run tests on every push and MR
+duoguard-tests:
+  stage: test
+  image: python:3.12-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  before_script:
+    - pip install --quiet -r requirements.txt pytest
+  script:
+    - echo "Running DuoGuard test suite..."
+    - python -m pytest tests/ -v --tb=short
+  artifacts:
+    reports:
+      junit: report.xml
+    when: always
 
 # Run DuoGuard security analysis on merge requests
 duoguard-security-scan:
