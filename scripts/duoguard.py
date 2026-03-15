@@ -950,6 +950,799 @@ def generate_sarif_report(
         json.dump(sarif, f, indent=2)
 
 
+# ── SBOM (Software Bill of Materials) Generation ──────────────
+
+# Maps dependency file names to their ecosystem
+ECOSYSTEM_MAP: dict[str, str] = {
+    "package.json": "npm",
+    "package-lock.json": "npm",
+    "yarn.lock": "npm",
+    "pnpm-lock.yaml": "npm",
+    "requirements.txt": "pypi",
+    "requirements-dev.txt": "pypi",
+    "requirements-prod.txt": "pypi",
+    "constraints.txt": "pypi",
+    "Pipfile": "pypi",
+    "Pipfile.lock": "pypi",
+    "pyproject.toml": "pypi",
+    "poetry.lock": "pypi",
+    "uv.lock": "pypi",
+    "pdm.lock": "pypi",
+    "setup.py": "pypi",
+    "setup.cfg": "pypi",
+    "go.mod": "golang",
+    "go.sum": "golang",
+    "Gemfile": "rubygems",
+    "Gemfile.lock": "rubygems",
+    "Cargo.toml": "cargo",
+    "Cargo.lock": "cargo",
+    "pom.xml": "maven",
+    "build.gradle": "maven",
+    "build.gradle.kts": "maven",
+    "composer.json": "packagist",
+    "composer.lock": "packagist",
+    "packages.config": "nuget",
+    "Directory.Packages.props": "nuget",
+    "mix.exs": "hex",
+    "mix.lock": "hex",
+    "Package.swift": "swift",
+    "Package.resolved": "swift",
+}
+
+# Package URL (purl) type mapping per ecosystem
+PURL_TYPE_MAP: dict[str, str] = {
+    "npm": "npm",
+    "pypi": "pypi",
+    "golang": "golang",
+    "rubygems": "gem",
+    "cargo": "cargo",
+    "maven": "maven",
+    "packagist": "composer",
+    "nuget": "nuget",
+    "hex": "hex",
+    "swift": "swift",
+}
+
+
+def _parse_npm_dependencies(diff_text: str) -> list[dict]:
+    """Extract npm dependencies from package.json diff additions."""
+    deps: list[dict] = []
+    # Match lines like:  +"package-name": "^1.2.3"
+    pattern = re.compile(
+        r'^\+\s*"([^"]+)"\s*:\s*"([^"]*)"',
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(diff_text):
+        name, version = match.group(1), match.group(2)
+        # Skip metadata keys (name, version, description, etc.)
+        if name in ("name", "version", "description", "main", "scripts",
+                     "repository", "author", "license", "private", "type",
+                     "engines", "homepage", "bugs", "keywords"):
+            continue
+        deps.append({
+            "name": name,
+            "version": version.lstrip("^~>=<! "),
+            "ecosystem": "npm",
+            "purl": f"pkg:npm/{name}@{version.lstrip('^~>=<! ')}",
+            "scope": "runtime",
+        })
+    return deps
+
+
+def _parse_pypi_dependencies(diff_text: str) -> list[dict]:
+    """Extract Python dependencies from requirements.txt diff additions."""
+    deps: list[dict] = []
+    # Match lines like: +requests==2.31.0 or +flask>=3.0
+    pattern = re.compile(
+        r'^\+\s*([a-zA-Z0-9_][a-zA-Z0-9._-]*)\s*([><=!~]+\s*[\d][^\s,;#]*)?',
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(diff_text):
+        name = match.group(1).strip()
+        version_spec = (match.group(2) or "").strip()
+        # Skip comment lines and pip flags
+        if name.startswith(("#", "-", "git+", "http")):
+            continue
+        version = re.sub(r'^[><=!~]+\s*', '', version_spec) if version_spec else "unknown"
+        deps.append({
+            "name": name,
+            "version": version,
+            "ecosystem": "pypi",
+            "purl": f"pkg:pypi/{name.lower()}@{version}",
+            "scope": "runtime",
+        })
+    return deps
+
+
+def _parse_go_dependencies(diff_text: str) -> list[dict]:
+    """Extract Go dependencies from go.mod diff additions."""
+    deps: list[dict] = []
+    # Match lines like: +    github.com/gin-gonic/gin v1.9.1
+    pattern = re.compile(
+        r'^\+\s+([a-zA-Z0-9._/-]+\.[a-zA-Z]+[a-zA-Z0-9._/-]*)\s+(v[\d][^\s]*)',
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(diff_text):
+        name, version = match.group(1), match.group(2)
+        deps.append({
+            "name": name,
+            "version": version.lstrip("v"),
+            "ecosystem": "golang",
+            "purl": f"pkg:golang/{name}@{version.lstrip('v')}",
+            "scope": "runtime",
+        })
+    return deps
+
+
+def _parse_cargo_dependencies(diff_text: str) -> list[dict]:
+    """Extract Rust dependencies from Cargo.toml diff additions."""
+    deps: list[dict] = []
+    # Match lines like: +serde = "1.0" or +tokio = { version = "1.0", features = [...] }
+    simple_pattern = re.compile(
+        r'^\+\s*([a-zA-Z0-9_-]+)\s*=\s*"([^"]*)"',
+        re.MULTILINE,
+    )
+    complex_pattern = re.compile(
+        r'^\+\s*([a-zA-Z0-9_-]+)\s*=\s*\{[^}]*version\s*=\s*"([^"]*)"',
+        re.MULTILINE,
+    )
+    for match in simple_pattern.finditer(diff_text):
+        name, version = match.group(1), match.group(2)
+        if name in ("name", "version", "edition", "description", "license",
+                     "authors", "repository", "homepage"):
+            continue
+        deps.append({
+            "name": name,
+            "version": version,
+            "ecosystem": "cargo",
+            "purl": f"pkg:cargo/{name}@{version}",
+            "scope": "runtime",
+        })
+    for match in complex_pattern.finditer(diff_text):
+        name, version = match.group(1), match.group(2)
+        deps.append({
+            "name": name,
+            "version": version,
+            "ecosystem": "cargo",
+            "purl": f"pkg:cargo/{name}@{version}",
+            "scope": "runtime",
+        })
+    return deps
+
+
+def _parse_gemfile_dependencies(diff_text: str) -> list[dict]:
+    """Extract Ruby dependencies from Gemfile diff additions."""
+    deps: list[dict] = []
+    # Match lines like: +gem 'rails', '~> 7.0'
+    pattern = re.compile(
+        r"""^\+\s*gem\s+['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]*)['"]\s*)?""",
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(diff_text):
+        name = match.group(1)
+        version = (match.group(2) or "").lstrip("~>= ")
+        deps.append({
+            "name": name,
+            "version": version or "unknown",
+            "ecosystem": "rubygems",
+            "purl": f"pkg:gem/{name}@{version or 'unknown'}",
+            "scope": "runtime",
+        })
+    return deps
+
+
+def _parse_maven_dependencies(diff_text: str) -> list[dict]:
+    """Extract Java dependencies from pom.xml diff additions."""
+    deps: list[dict] = []
+    # Simple extraction of groupId/artifactId/version blocks in pom.xml
+    # Match added dependency blocks
+    dep_blocks = re.findall(
+        r'<dependency>\s*'
+        r'<groupId>([^<]+)</groupId>\s*'
+        r'<artifactId>([^<]+)</artifactId>\s*'
+        r'(?:<version>([^<]+)</version>)?',
+        diff_text,
+    )
+    for group_id, artifact_id, version in dep_blocks:
+        version = version or "unknown"
+        deps.append({
+            "name": f"{group_id}:{artifact_id}",
+            "version": version,
+            "ecosystem": "maven",
+            "purl": f"pkg:maven/{group_id}/{artifact_id}@{version}",
+            "scope": "runtime",
+        })
+    return deps
+
+
+def parse_dependencies_from_diff(changes: list[dict]) -> list[dict]:
+    """Parse all dependencies from MR diff changes across ecosystems.
+
+    Examines each changed file, identifies its ecosystem, and extracts
+    added dependencies with name, version, ecosystem, and Package URL.
+
+    Returns a deduplicated list of dependency dicts.
+    """
+    all_deps: list[dict] = []
+    seen: set[str] = set()
+
+    parsers = {
+        "npm": _parse_npm_dependencies,
+        "pypi": _parse_pypi_dependencies,
+        "golang": _parse_go_dependencies,
+        "cargo": _parse_cargo_dependencies,
+        "rubygems": _parse_gemfile_dependencies,
+        "maven": _parse_maven_dependencies,
+    }
+
+    for change in changes:
+        path = change.get("new_path", change.get("old_path", ""))
+        filename = Path(path).name
+        ecosystem = ECOSYSTEM_MAP.get(filename)
+        if not ecosystem:
+            continue
+
+        diff = change.get("diff", "")
+        if not diff:
+            continue
+
+        parser = parsers.get(ecosystem)
+        if not parser:
+            continue
+
+        for dep in parser(diff):
+            key = f"{dep['ecosystem']}:{dep['name']}:{dep['version']}"
+            if key not in seen:
+                seen.add(key)
+                all_deps.append(dep)
+
+    return all_deps
+
+
+def generate_sbom(
+    changes: list[dict],
+    project_name: str = "unknown",
+    project_version: str = "0.0.0",
+    output_path: str | None = None,
+) -> dict:
+    """Generate a CycloneDX 1.5 SBOM from MR dependency changes.
+
+    Produces a Software Bill of Materials in CycloneDX JSON format,
+    which is the standard supported by GitLab Dependency Scanning.
+
+    Args:
+        changes: list of MR change dicts (with new_path and diff)
+        project_name: name of the project for the SBOM metadata
+        project_version: version string for the project
+        output_path: optional file path to write the SBOM JSON
+
+    Returns:
+        The CycloneDX SBOM dict.
+    """
+    deps = parse_dependencies_from_diff(changes)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    serial = f"urn:uuid:{uuid.uuid4()}"
+
+    components = []
+    for dep in deps:
+        component = {
+            "type": "library",
+            "name": dep["name"],
+            "version": dep["version"],
+            "purl": dep["purl"],
+            "properties": [
+                {"name": "duoguard:ecosystem", "value": dep["ecosystem"]},
+                {"name": "duoguard:scope", "value": dep.get("scope", "runtime")},
+            ],
+        }
+        # Add group for Maven-style coordinates
+        if ":" in dep["name"] and dep["ecosystem"] == "maven":
+            parts = dep["name"].split(":", 1)
+            component["group"] = parts[0]
+            component["name"] = parts[1]
+        components.append(component)
+
+    sbom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "serialNumber": serial,
+        "version": 1,
+        "metadata": {
+            "timestamp": timestamp,
+            "tools": [{
+                "vendor": "DuoGuard",
+                "name": "DuoGuard SBOM Generator",
+                "version": "1.0.0",
+            }],
+            "component": {
+                "type": "application",
+                "name": project_name,
+                "version": project_version,
+            },
+        },
+        "components": components,
+        "dependencies": [
+            {
+                "ref": project_name,
+                "dependsOn": [dep["purl"] for dep in deps],
+            }
+        ],
+    }
+
+    if output_path:
+        with open(output_path, "w") as f:
+            json.dump(sbom, f, indent=2)
+
+    return sbom
+
+
+def sbom_to_gitlab_dependency_report(sbom: dict) -> dict:
+    """Convert a CycloneDX SBOM to GitLab Dependency Scanning report format.
+
+    This allows DuoGuard SBOM output to integrate with GitLab's
+    Dependency Scanning widget in the MR and Security Dashboard.
+
+    Returns a GitLab-compatible dependency scanning report dict.
+    """
+    dependencies = []
+    for comp in sbom.get("components", []):
+        dep_entry = {
+            "name": comp.get("name", "unknown"),
+            "version": comp.get("version", "unknown"),
+            "package_manager": "unknown",
+        }
+        # Extract ecosystem from properties
+        for prop in comp.get("properties", []):
+            if prop.get("name") == "duoguard:ecosystem":
+                dep_entry["package_manager"] = prop["value"]
+        if comp.get("purl"):
+            dep_entry["purl"] = comp["purl"]
+        dependencies.append(dep_entry)
+
+    return {
+        "version": "15.0.7",
+        "schema": "https://gitlab.com/gitlab-org/security-products/security-report-schemas/-/raw/v15.0.7/dist/dependency-scanning-report-format.json",
+        "scan": {
+            "type": "dependency_scanning",
+            "status": "success",
+            "scanner": {
+                "id": "duoguard-sbom",
+                "name": "DuoGuard SBOM Scanner",
+                "version": "1.0.0",
+                "vendor": {"name": "DuoGuard"},
+            },
+            "analyzer": {
+                "id": "duoguard-sbom-analyzer",
+                "name": "DuoGuard Dependency Analyzer",
+                "version": "1.0.0",
+                "vendor": {"name": "DuoGuard"},
+            },
+        },
+        "dependency_files": [],
+        "dependencies": dependencies,
+        "vulnerabilities": [],
+    }
+
+
+# ── Security Compliance Mapping ───────────────────────────────
+
+# CWE to compliance control mappings
+# Maps CWE IDs to relevant controls in SOC2, ISO 27001, and NIST 800-53
+
+COMPLIANCE_CONTROLS: dict[str, dict[str, list[str]]] = {
+    "CWE-89": {  # SQL Injection
+        "soc2": ["CC6.1", "CC6.6", "CC7.1"],
+        "iso27001": ["A.14.2.5", "A.14.1.2"],
+        "nist": ["SI-10", "SI-16", "SA-11"],
+        "description": "SQL Injection — Input validation and secure coding",
+    },
+    "CWE-79": {  # XSS
+        "soc2": ["CC6.1", "CC6.6"],
+        "iso27001": ["A.14.2.5", "A.14.1.2"],
+        "nist": ["SI-10", "SA-11"],
+        "description": "Cross-Site Scripting — Output encoding and input sanitization",
+    },
+    "CWE-78": {  # OS Command Injection
+        "soc2": ["CC6.1", "CC6.6", "CC7.1", "CC7.2"],
+        "iso27001": ["A.14.2.5", "A.12.5.1"],
+        "nist": ["SI-10", "SI-3", "SA-11"],
+        "description": "OS Command Injection — Input validation and least privilege",
+    },
+    "CWE-22": {  # Path Traversal
+        "soc2": ["CC6.1", "CC6.3"],
+        "iso27001": ["A.14.2.5", "A.9.4.1"],
+        "nist": ["SI-10", "AC-3"],
+        "description": "Path Traversal — Access control and input validation",
+    },
+    "CWE-918": {  # SSRF
+        "soc2": ["CC6.1", "CC6.6", "CC6.7"],
+        "iso27001": ["A.14.2.5", "A.13.1.1"],
+        "nist": ["SI-10", "SC-7", "AC-4"],
+        "description": "Server-Side Request Forgery — Network segmentation and input validation",
+    },
+    "CWE-502": {  # Deserialization
+        "soc2": ["CC6.1", "CC7.1"],
+        "iso27001": ["A.14.2.5", "A.14.1.2"],
+        "nist": ["SI-10", "SI-2"],
+        "description": "Insecure Deserialization — Data integrity and input validation",
+    },
+    "CWE-611": {  # XXE
+        "soc2": ["CC6.1", "CC6.6"],
+        "iso27001": ["A.14.2.5"],
+        "nist": ["SI-10", "SA-11"],
+        "description": "XML External Entity — Secure XML parsing configuration",
+    },
+    "CWE-287": {  # Authentication Bypass
+        "soc2": ["CC6.1", "CC6.2", "CC6.3"],
+        "iso27001": ["A.9.4.2", "A.14.2.5"],
+        "nist": ["IA-2", "IA-5", "AC-3"],
+        "description": "Authentication Bypass — Strong authentication mechanisms",
+    },
+    "CWE-798": {  # Hardcoded Credentials
+        "soc2": ["CC6.1", "CC6.2", "CC6.7"],
+        "iso27001": ["A.9.2.4", "A.9.4.3", "A.14.2.5"],
+        "nist": ["IA-5", "SC-12", "SC-28"],
+        "description": "Hardcoded Credentials — Secrets management and key rotation",
+    },
+    "CWE-321": {  # Hardcoded Crypto Key
+        "soc2": ["CC6.1", "CC6.7"],
+        "iso27001": ["A.10.1.2", "A.14.2.5"],
+        "nist": ["SC-12", "SC-13"],
+        "description": "Hardcoded Cryptographic Key — Key management procedures",
+    },
+    "CWE-327": {  # Weak Cryptography
+        "soc2": ["CC6.1", "CC6.7"],
+        "iso27001": ["A.10.1.1", "A.10.1.2"],
+        "nist": ["SC-12", "SC-13"],
+        "description": "Weak Cryptographic Algorithm — Use approved algorithms",
+    },
+    "CWE-330": {  # Insecure Randomness
+        "soc2": ["CC6.1"],
+        "iso27001": ["A.10.1.1"],
+        "nist": ["SC-13"],
+        "description": "Insufficient Randomness — Use CSPRNG for security operations",
+    },
+    "CWE-601": {  # Open Redirect
+        "soc2": ["CC6.1", "CC6.6"],
+        "iso27001": ["A.14.2.5"],
+        "nist": ["SI-10"],
+        "description": "Open Redirect — URL validation and whitelisting",
+    },
+    "CWE-352": {  # CSRF
+        "soc2": ["CC6.1", "CC6.6"],
+        "iso27001": ["A.14.2.5", "A.14.1.2"],
+        "nist": ["SI-10", "SC-23"],
+        "description": "Cross-Site Request Forgery — Anti-CSRF tokens",
+    },
+    "CWE-362": {  # Race Condition
+        "soc2": ["CC7.1"],
+        "iso27001": ["A.14.2.5"],
+        "nist": ["SI-16"],
+        "description": "Race Condition — Synchronization and concurrency controls",
+    },
+    "CWE-120": {  # Buffer Overflow
+        "soc2": ["CC7.1", "CC7.2"],
+        "iso27001": ["A.14.2.5", "A.12.6.1"],
+        "nist": ["SI-16", "SA-11"],
+        "description": "Buffer Overflow — Memory-safe coding practices",
+    },
+    "CWE-190": {  # Integer Overflow
+        "soc2": ["CC7.1"],
+        "iso27001": ["A.14.2.5"],
+        "nist": ["SI-16"],
+        "description": "Integer Overflow — Bounds checking and safe integer operations",
+    },
+    "CWE-862": {  # Missing Authorization
+        "soc2": ["CC6.1", "CC6.3"],
+        "iso27001": ["A.9.4.1", "A.14.2.5"],
+        "nist": ["AC-3", "AC-6"],
+        "description": "Missing Authorization — Enforce access control checks",
+    },
+    "CWE-639": {  # IDOR
+        "soc2": ["CC6.1", "CC6.3"],
+        "iso27001": ["A.9.4.1"],
+        "nist": ["AC-3", "AC-4"],
+        "description": "Insecure Direct Object Reference — Object-level authorization",
+    },
+    "CWE-117": {  # Log Injection
+        "soc2": ["CC7.1", "CC7.3"],
+        "iso27001": ["A.12.4.1", "A.14.2.5"],
+        "nist": ["AU-3", "SI-10"],
+        "description": "Log Injection — Log sanitization and integrity",
+    },
+    "CWE-200": {  # Information Disclosure
+        "soc2": ["CC6.1", "CC6.5"],
+        "iso27001": ["A.18.1.4", "A.14.2.5"],
+        "nist": ["AC-4", "SC-8"],
+        "description": "Information Disclosure — Data classification and access control",
+    },
+    "CWE-90": {  # LDAP Injection
+        "soc2": ["CC6.1", "CC6.6"],
+        "iso27001": ["A.14.2.5"],
+        "nist": ["SI-10", "SA-11"],
+        "description": "LDAP Injection — Input validation for LDAP queries",
+    },
+    "CWE-91": {  # XML Injection
+        "soc2": ["CC6.1"],
+        "iso27001": ["A.14.2.5"],
+        "nist": ["SI-10"],
+        "description": "XML Injection — Secure XML processing",
+    },
+    "CWE-94": {  # Code Injection
+        "soc2": ["CC6.1", "CC6.6", "CC7.1"],
+        "iso27001": ["A.14.2.5", "A.12.5.1"],
+        "nist": ["SI-10", "SI-3", "SA-11"],
+        "description": "Code Injection — Avoid dynamic code execution with user input",
+    },
+    "CWE-95": {  # Eval Injection
+        "soc2": ["CC6.1", "CC6.6"],
+        "iso27001": ["A.14.2.5"],
+        "nist": ["SI-10", "SA-11"],
+        "description": "Eval Injection — Eliminate eval() with user-controlled data",
+    },
+    "CWE-1321": {  # Prototype Pollution
+        "soc2": ["CC6.1"],
+        "iso27001": ["A.14.2.5"],
+        "nist": ["SI-10", "SI-16"],
+        "description": "Prototype Pollution — Object freezing and input validation",
+    },
+    "CWE-915": {  # Mass Assignment
+        "soc2": ["CC6.1", "CC6.3"],
+        "iso27001": ["A.14.2.5", "A.9.4.1"],
+        "nist": ["AC-3", "SI-10"],
+        "description": "Mass Assignment — Allowlist acceptable fields",
+    },
+    "CWE-434": {  # Unrestricted Upload
+        "soc2": ["CC6.1", "CC6.6", "CC7.1"],
+        "iso27001": ["A.14.2.5", "A.12.2.1"],
+        "nist": ["SI-3", "SI-10", "SC-18"],
+        "description": "Unrestricted File Upload — File type validation and sandboxing",
+    },
+    "CWE-400": {  # Resource Exhaustion
+        "soc2": ["CC7.1", "CC7.2"],
+        "iso27001": ["A.12.1.3", "A.14.2.5"],
+        "nist": ["SC-5", "SI-10"],
+        "description": "Resource Exhaustion — Rate limiting and input size bounds",
+    },
+    "CWE-1333": {  # ReDoS
+        "soc2": ["CC7.1"],
+        "iso27001": ["A.14.2.5"],
+        "nist": ["SC-5", "SI-10"],
+        "description": "ReDoS — Use safe regex patterns and input length limits",
+    },
+}
+
+# SOC2 Trust Services Criteria descriptions
+SOC2_CONTROLS: dict[str, str] = {
+    "CC6.1": "Logical and Physical Access Controls — The entity implements logical access security",
+    "CC6.2": "User Authentication — Prior to issuing system credentials and granting access",
+    "CC6.3": "Authorization — The entity authorizes, modifies, or removes access",
+    "CC6.5": "Data Transmission — The entity protects data transmitted",
+    "CC6.6": "Security Controls — The entity implements controls to prevent threats",
+    "CC6.7": "Data Disposal — The entity restricts transmission of confidential data",
+    "CC7.1": "Monitoring — The entity detects and monitors anomalies",
+    "CC7.2": "Incident Response — The entity monitors system components for anomalies",
+    "CC7.3": "Recovery — The entity evaluates security events to determine their impact",
+}
+
+# ISO 27001:2022 control descriptions
+ISO27001_CONTROLS: dict[str, str] = {
+    "A.9.2.4": "Management of secret authentication information of users",
+    "A.9.4.1": "Information access restriction",
+    "A.9.4.2": "Secure log-on procedures",
+    "A.9.4.3": "Password management system",
+    "A.10.1.1": "Policy on the use of cryptographic controls",
+    "A.10.1.2": "Key management",
+    "A.12.1.3": "Capacity management",
+    "A.12.2.1": "Controls against malware",
+    "A.12.4.1": "Event logging",
+    "A.12.5.1": "Installation of software on operational systems",
+    "A.12.6.1": "Management of technical vulnerabilities",
+    "A.13.1.1": "Network controls",
+    "A.14.1.2": "Securing application services on public networks",
+    "A.14.2.5": "Secure system engineering principles",
+    "A.18.1.4": "Privacy and protection of personally identifiable information",
+}
+
+# NIST 800-53 control descriptions
+NIST_CONTROLS: dict[str, str] = {
+    "AC-3": "Access Enforcement",
+    "AC-4": "Information Flow Enforcement",
+    "AC-6": "Least Privilege",
+    "AU-3": "Content of Audit Records",
+    "IA-2": "Identification and Authentication",
+    "IA-5": "Authenticator Management",
+    "SA-11": "Developer Testing and Evaluation",
+    "SC-5": "Denial-of-Service Protection",
+    "SC-7": "Boundary Protection",
+    "SC-8": "Transmission Confidentiality and Integrity",
+    "SC-12": "Cryptographic Key Establishment and Management",
+    "SC-13": "Cryptographic Protection",
+    "SC-18": "Mobile Code",
+    "SC-23": "Session Authenticity",
+    "SC-28": "Protection of Information at Rest",
+    "SI-2": "Flaw Remediation",
+    "SI-3": "Malicious Code Protection",
+    "SI-10": "Information Input Validation",
+    "SI-16": "Memory Protection",
+}
+
+
+def map_finding_to_compliance(finding: dict) -> dict:
+    """Map a security finding to compliance framework controls.
+
+    Takes a finding dict (with at least 'cwe' and optionally 'severity',
+    'description') and returns a dict with compliance control mappings.
+
+    Returns a dict with keys: cwe, soc2, iso27001, nist, description,
+    and the original finding fields.
+    """
+    cwe = finding.get("cwe", "")
+    controls = COMPLIANCE_CONTROLS.get(cwe, {})
+
+    return {
+        **finding,
+        "compliance": {
+            "cwe": cwe,
+            "soc2": controls.get("soc2", []),
+            "iso27001": controls.get("iso27001", []),
+            "nist": controls.get("nist", []),
+            "control_description": controls.get("description", ""),
+        },
+    }
+
+
+def map_findings_to_compliance(findings: list[dict]) -> list[dict]:
+    """Map all findings to compliance controls.
+
+    Returns a new list with compliance mappings added to each finding.
+    """
+    return [map_finding_to_compliance(f) for f in findings]
+
+
+def generate_compliance_report(
+    findings: list[dict],
+    frameworks: list[str] | None = None,
+) -> dict:
+    """Generate a compliance-oriented report from security findings.
+
+    Aggregates findings by compliance framework and control, producing
+    a structured report showing which controls are impacted by which
+    findings.
+
+    Args:
+        findings: list of finding dicts (should already have 'cwe' enrichment)
+        frameworks: list of frameworks to include (default: all three)
+
+    Returns:
+        A dict with per-framework control impact summaries and overall
+        compliance posture assessment.
+    """
+    if frameworks is None:
+        frameworks = ["soc2", "iso27001", "nist"]
+
+    mapped = map_findings_to_compliance(findings)
+
+    # Aggregate by framework and control
+    framework_data: dict[str, dict] = {}
+
+    control_descriptions = {
+        "soc2": SOC2_CONTROLS,
+        "iso27001": ISO27001_CONTROLS,
+        "nist": NIST_CONTROLS,
+    }
+
+    for fw in frameworks:
+        controls_impacted: dict[str, list[dict]] = {}
+        for m in mapped:
+            comp = m.get("compliance", {})
+            for ctrl in comp.get(fw, []):
+                if ctrl not in controls_impacted:
+                    controls_impacted[ctrl] = []
+                controls_impacted[ctrl].append({
+                    "cwe": comp.get("cwe", ""),
+                    "severity": m.get("severity", "info"),
+                    "description": m.get("description", ""),
+                    "file_path": m.get("file_path", "unknown"),
+                })
+
+        desc_map = control_descriptions.get(fw, {})
+        framework_data[fw] = {
+            "controls_impacted": len(controls_impacted),
+            "total_controls": len(desc_map),
+            "details": {
+                ctrl: {
+                    "description": desc_map.get(ctrl, ctrl),
+                    "findings": ctrl_findings,
+                    "finding_count": len(ctrl_findings),
+                    "max_severity": _max_severity([f["severity"] for f in ctrl_findings]),
+                }
+                for ctrl, ctrl_findings in sorted(controls_impacted.items())
+            },
+        }
+
+    # Overall posture
+    severity_order = ["info", "low", "medium", "high", "critical"]
+    all_severities = [f.get("severity", "info") for f in findings]
+    max_sev = _max_severity(all_severities) if all_severities else "none"
+
+    posture_map = {
+        "critical": "NON_COMPLIANT",
+        "high": "AT_RISK",
+        "medium": "NEEDS_REVIEW",
+        "low": "ACCEPTABLE",
+        "info": "COMPLIANT",
+        "none": "COMPLIANT",
+    }
+
+    return {
+        "report_type": "compliance",
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "frameworks": framework_data,
+        "overall_posture": posture_map.get(max_sev, "COMPLIANT"),
+        "total_findings": len(findings),
+        "findings_with_compliance_mapping": sum(
+            1 for m in mapped if m.get("compliance", {}).get("cwe") in COMPLIANCE_CONTROLS
+        ),
+    }
+
+
+def _max_severity(severities: list[str]) -> str:
+    """Return the highest severity from a list."""
+    order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    if not severities:
+        return "none"
+    return max(severities, key=lambda s: order.get(s.lower(), -1))
+
+
+def format_compliance_markdown(report: dict) -> str:
+    """Format a compliance report dict as a Markdown section for the MR report.
+
+    Produces a human-readable compliance section with tables per framework.
+    """
+    lines = [
+        "### Compliance Impact Assessment",
+        "",
+        f"**Overall Posture:** {report.get('overall_posture', 'UNKNOWN')}",
+        f"**Findings with Compliance Mapping:** "
+        f"{report.get('findings_with_compliance_mapping', 0)}"
+        f"/{report.get('total_findings', 0)}",
+        "",
+    ]
+
+    framework_labels = {
+        "soc2": "SOC 2 Type II",
+        "iso27001": "ISO 27001:2022",
+        "nist": "NIST 800-53",
+    }
+
+    for fw, fw_data in report.get("frameworks", {}).items():
+        label = framework_labels.get(fw, fw.upper())
+        impacted = fw_data.get("controls_impacted", 0)
+        total = fw_data.get("total_controls", 0)
+        lines.append(f"#### {label}")
+        lines.append(f"**Controls Impacted:** {impacted}/{total}")
+        lines.append("")
+
+        details = fw_data.get("details", {})
+        if details:
+            lines.append("| Control | Description | Findings | Max Severity |")
+            lines.append("|---------|-------------|----------|--------------|")
+            for ctrl, ctrl_data in details.items():
+                desc = ctrl_data.get("description", "")
+                if len(desc) > 50:
+                    desc = desc[:47] + "..."
+                count = ctrl_data.get("finding_count", 0)
+                max_sev = ctrl_data.get("max_severity", "info").upper()
+                lines.append(f"| {ctrl} | {desc} | {count} | {max_sev} |")
+            lines.append("")
+        else:
+            lines.append("No controls impacted.")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 def _resolve_api_url_for_agent() -> str:
     """Build GitLab API URL from agent environment variables."""
     hostname = GITLAB_HOSTNAME or "gitlab.com"
