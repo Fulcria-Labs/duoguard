@@ -17,7 +17,7 @@ duoguard-tests:
     - pip install --quiet -r requirements.txt pytest
   script:
     - echo "Running DuoGuard test suite..."
-    - python -m pytest tests/ -v --tb=short
+    - python -m pytest tests/ -v --tb=short --junitxml=report.xml
   artifacts:
     reports:
       junit: report.xml
