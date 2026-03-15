@@ -115,7 +115,7 @@ DuoGuard includes a Flow Registry v1 flow at `.gitlab/duo/flows/security-review.
 ### Option 4: Local Development
 
 ```bash
-git clone https://gitlab.com/gitlab-ai-hackathon/duoguard.git
+git clone https://gitlab.com/optimus-fulcria/duoguard.git
 cd duoguard
 pip install requests pyyaml urllib3
 
@@ -249,7 +249,7 @@ duoguard/
 │   └── post_report.py                        # MR comments, inline discussions, approval
 ├── docs/
 │   └── external-agent-config.yml             # Config to paste in GitLab UI
-├── tests/                                    # 2035 tests (8 files, 6 suites)
+├── tests/                                    # 2205 tests (9 files)
 ├── .gitlab-ci.yml                            # CI/CD pipeline
 ├── .duoguard.yml                             # Project configuration (optional)
 ├── AGENTS.md                                 # Agent customization
@@ -262,7 +262,7 @@ duoguard/
 ## Testing
 
 ```bash
-# Run all 2035 tests (8 test files, 6 suites)
+# Run all 2205 tests (9 test files)
 python -m pytest tests/ -v
 
 # Tests cover: diff formatting, dependency extraction, severity scoring,
@@ -277,7 +277,7 @@ python -m pytest tests/ -v
 ## Prize Categories
 
 - **Anthropic + GitLab Grand Prize** — Deep Claude integration: semantic security analysis, multi-agent orchestration, AI Gateway managed credentials
-- **Most Technically Impressive** — Flow Registry v1 flow, parallel multi-agent execution, dual-mode (CI/CD + agent trigger), SARIF + Code Quality + inline discussions + MR labels + MR approval + discussion deduplication + CWE/OWASP enrichment + diff complexity analysis + GitLab issue creation + scan metrics, 2035 tests
+- **Most Technically Impressive** — Flow Registry v1 flow, parallel multi-agent execution, dual-mode (CI/CD + agent trigger), SARIF + Code Quality + inline discussions + MR labels + MR approval + discussion deduplication + CWE/OWASP enrichment + diff complexity analysis + GitLab issue creation + scan metrics, 2205 tests
 - **Most Impactful** — Security automation that benefits every development team, zero-config with `injectGatewayToken`, configurable via `.duoguard.yml`, OWASP Top 10 coverage
 
 ## License
