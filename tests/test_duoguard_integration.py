@@ -376,12 +376,12 @@ class TestConfigFileEdgeCases:
         assert config["model"] == DEFAULT_CONFIG["model"]
 
     def test_yaml_with_null_value(self, tmp_path):
-        """Null values in YAML should not crash."""
+        """Null values in YAML should fall back to default HIGH."""
         cfg = tmp_path / ".duoguard.yml"
         cfg.write_text("severity_threshold: null\n")
         config = load_config(str(cfg))
-        # null gets interpreted as None, but config should still load
-        assert config["severity_threshold"] is None
+        # null is invalid severity, validation resets to default
+        assert config["severity_threshold"] == "HIGH"
 
     def test_yaml_with_list_instead_of_dict(self, tmp_path):
         """Top-level YAML list should fall through to defaults."""

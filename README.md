@@ -4,6 +4,12 @@ An open-source, multi-agent security review flow that automatically analyzes mer
 
 **Works automatically. Catches real bugs. Suggests actual fixes.**
 
+## See It In Action
+
+![DuoGuard Demo](duoguard-demo.gif)
+
+Watch DuoGuard analyze a merge request: three agents running in parallel, findings with CWE/OWASP classifications, inline discussions posted to the MR, and security labels auto-applied. [Full demo video](duoguard-demo.mp4).
+
 ## What It Does
 
 DuoGuard orchestrates three specialized AI agents to perform comprehensive security review on every merge request:

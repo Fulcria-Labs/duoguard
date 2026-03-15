@@ -20,6 +20,9 @@ GITLAB_TOKEN = os.environ.get("CI_JOB_TOKEN", os.environ.get("GITLAB_TOKEN", "")
 
 
 def _headers() -> dict[str, str]:
+    if not GITLAB_TOKEN:
+        print("WARNING: No GitLab token configured. "
+              "Set CI_JOB_TOKEN or GITLAB_TOKEN for API access.")
     return {"PRIVATE-TOKEN": GITLAB_TOKEN}
 
 
@@ -387,6 +390,7 @@ def create_issues_for_findings(
     severity_order = ["info", "low", "medium", "high", "critical"]
     min_idx = severity_order.index(min_severity.lower()) if min_severity.lower() in severity_order else 3
     created = []
+    failed = 0
     for f in findings:
         sev = f.get("severity", "info").lower()
         sev_idx = severity_order.index(sev) if sev in severity_order else 0
@@ -394,6 +398,10 @@ def create_issues_for_findings(
             issue = create_issue_for_finding(project_id, mr_iid, f)
             if issue:
                 created.append(issue)
+            else:
+                failed += 1
+    if failed:
+        print(f"  WARNING: {failed} issue(s) failed to create.")
     return created
 
 

@@ -87,6 +87,17 @@ def load_config(config_path: str | None = None) -> dict:
                 print(f"  Config loaded from {p}")
             break
 
+    # Validate severity_threshold
+    valid_severities = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE"}
+    sev = config.get("severity_threshold", "HIGH")
+    if isinstance(sev, str):
+        sev = sev.upper()
+    if sev not in valid_severities:
+        print(f"  WARNING: Invalid severity_threshold {sev!r} in config. Using default HIGH.")
+        config["severity_threshold"] = "HIGH"
+    else:
+        config["severity_threshold"] = sev
+
     return config
 
 # GitLab API - supports both CI/CD and agent trigger modes
@@ -237,6 +248,9 @@ def format_diff_for_analysis(changes: list[dict], max_size: int = MAX_DIFF_SIZE)
             f"\n\n> **Note:** {truncated} file(s) omitted because the diff "
             f"exceeded the {max_size:,}-character limit.\n"
         )
+        print(f"  WARNING: Diff truncated — {truncated} file(s) omitted "
+              f"(limit: {max_size:,} chars). "
+              f"Adjust max_diff_size in .duoguard.yml to analyze more.")
     return text
 
 
@@ -1140,6 +1154,11 @@ def run_agent_mode(output: str = "duoguard-report.md", sarif: str = "",
         print("ERROR: Could not determine project ID and MR IID from agent context.")
         print(f"  AI_FLOW_PROJECT_PATH: {AI_FLOW_PROJECT_PATH!r}")
         print(f"  AI_FLOW_CONTEXT: {AI_FLOW_CONTEXT[:200]!r}...")
+        if not AI_FLOW_PROJECT_PATH:
+            print("  HINT: AI_FLOW_PROJECT_PATH is not set. "
+                  "Ensure the agent is configured in GitLab Duo.")
+        if not GITLAB_TOKEN:
+            print("  HINT: No GitLab token found. Set AI_FLOW_GITLAB_TOKEN or GITLAB_TOKEN.")
         sys.exit(1)
 
     _run_security_scan(project_id, mr_iid, output, sarif, fail_on, config=config)
