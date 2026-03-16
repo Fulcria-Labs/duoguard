@@ -48,6 +48,7 @@ DEFAULT_CONFIG: dict = {
     "approve_threshold": "HIGH",
     "model": "claude-sonnet-4-5",
     "max_diff_size": 200_000,
+    "fix_suggestions": True,
 }
 
 
@@ -757,6 +758,7 @@ def generate_report(
     scan_duration: float | None = None,
     files_scanned: int = 0,
     complexity: dict | None = None,
+    fix_suggestions: str | None = None,
 ) -> str:
     """Generate the final security review report."""
     severity = determine_severity(code_findings, dep_findings, secret_findings)
@@ -803,6 +805,12 @@ def generate_report(
 
 **Overall Risk Level:** {severity_emoji.get(severity, '')} **{severity}**
 """
+
+    # Add fix suggestions if available
+    if fix_suggestions and fix_suggestions.strip():
+        report += "\n### :wrench: Fix Suggestions\n\n"
+        report += fix_suggestions
+        report += "\n\n"
 
     # Add complexity analysis if available
     if complexity and complexity.get("complexity_score", 0) > 0:
@@ -1743,6 +1751,82 @@ def format_compliance_markdown(report: dict) -> str:
     return "\n".join(lines)
 
 
+# ── Fix Suggestions (Auto-Remediation) ────────────────────────
+
+FIX_SUGGESTION_PROMPT = """You are a senior security engineer generating fix suggestions.
+For each security finding, provide a concise, actionable code fix.
+
+Rules:
+- Output ONLY the fixed code snippet (no explanations unless essential).
+- If the fix requires multiple steps, number them.
+- Use the SAME programming language as the original code.
+- Prefer the most secure standard-library approach.
+- If a finding is informational or cannot be auto-fixed, say "Manual review recommended."
+- Keep suggestions under 20 lines each.
+
+Format each fix as:
+### Fix for: <finding description>
+**File:** `<path>` (line <N>)
+```<language>
+<fixed code>
+```
+"""
+
+
+def generate_fix_suggestions(
+    findings: list[dict],
+    diff_text: str,
+    model: str = "claude-sonnet-4-5",
+) -> str:
+    """Generate AI-powered fix suggestions for security findings.
+
+    Sends parsed findings along with the relevant diff context to Claude,
+    which returns concrete remediation code snippets for each issue.
+
+    Args:
+        findings: list of finding dicts from ``_parse_findings``
+        diff_text: the formatted MR diff (for context)
+        model: Claude model to use
+
+    Returns:
+        Markdown-formatted fix suggestions string.
+    """
+    if not findings:
+        return "_No findings require fix suggestions._"
+
+    # Build a concise summary of findings for the AI
+    finding_lines = []
+    for i, f in enumerate(findings, 1):
+        sev = f.get("severity", "info").upper()
+        desc = f.get("description", "Unknown")
+        path = f.get("file_path", "unknown")
+        line = f.get("line_num", 1)
+        cwe = f.get("cwe", "")
+        cwe_str = f" ({cwe})" if cwe else ""
+        finding_lines.append(
+            f"{i}. [{sev}]{cwe_str} {desc} — `{path}` line {line}"
+        )
+
+    findings_summary = "\n".join(finding_lines)
+
+    # Truncate diff to keep token usage reasonable
+    max_context = 50_000
+    context = diff_text[:max_context]
+    if len(diff_text) > max_context:
+        context += "\n\n> (diff truncated for token limit)"
+
+    user_message = (
+        f"Generate fix suggestions for these {len(findings)} security finding(s):\n\n"
+        f"{findings_summary}\n\n"
+        f"Here is the relevant code diff for context:\n\n{context}"
+    )
+
+    try:
+        return call_ai_gateway(FIX_SUGGESTION_PROMPT, user_message, model=model)
+    except Exception as e:
+        return f"_Fix suggestion generation failed: {e}_"
+
+
 def _resolve_api_url_for_agent() -> str:
     """Build GitLab API URL from agent environment variables."""
     hostname = GITLAB_HOSTNAME or "gitlab.com"
@@ -1879,12 +1963,26 @@ def _run_security_scan(project_id: str, mr_iid: str, output: str, sarif: str,
         print(f"       Security-sensitive files: {', '.join(complexity['high_risk_files'][:5])}")
     print(f"       Complexity score: {complexity['complexity_score']}/100")
 
+    # Generate fix suggestions for findings
+    fix_suggestions = None
+    if cfg.get("fix_suggestions", True):
+        all_parsed = (
+            _parse_findings(code_findings, "code-security")
+            + _parse_findings(dep_findings, "dependency-audit")
+            + _parse_findings(secret_findings, "secret-scan")
+        )
+        if all_parsed:
+            print("\n[2.5/5] Generating fix suggestions...")
+            model = cfg.get("model", "claude-sonnet-4-5")
+            fix_suggestions = generate_fix_suggestions(all_parsed, diff_text, model=model)
+            print(f"         Generated suggestions for {len(all_parsed)} finding(s)")
+
     # Generate reports
     scan_duration = time.monotonic() - scan_start
     print("\n[3/5] Generating reports...")
     report = generate_report(mr_info, code_findings, dep_findings, secret_findings,
                              scan_duration=scan_duration, files_scanned=len(changes),
-                             complexity=complexity)
+                             complexity=complexity, fix_suggestions=fix_suggestions)
     Path(output).write_text(report)
     print(f"       Markdown report: {output}")
 

@@ -2223,7 +2223,7 @@ class TestDefaultConfigValues:
         expected_keys = {
             "version", "severity_threshold", "agents", "exclude_paths",
             "exclude_extensions", "inline_comments", "approve",
-            "approve_threshold", "model", "max_diff_size",
+            "approve_threshold", "model", "max_diff_size", "fix_suggestions",
         }
         assert set(DEFAULT_CONFIG.keys()) == expected_keys
 
