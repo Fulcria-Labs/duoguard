@@ -26,7 +26,7 @@ Results are posted directly to the MR as summary comments, inline diff discussio
 - **Claude AI (Anthropic)** - Semantic code understanding, not pattern matching
 - **CI/CD Pipeline** - Runs automatically on every MR via `.gitlab-ci.yml`
 - **Python** - Core orchestrator with GitLab API integration
-- **2,265 tests** across 10 test files covering all functionality
+- **2,523 tests** across 13 test files covering all functionality
 
 ## Challenges we ran into
 - Designing the multi-agent orchestration so three agents can analyze the same MR diff in parallel without conflicts

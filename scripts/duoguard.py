@@ -2084,6 +2084,221 @@ def export_findings_json(
     return all_findings
 
 
+# ── GitLab MR Interaction ────────────────────────────────────
+
+
+def post_mr_note(project_id: str, mr_iid: str, body: str) -> bool:
+    """Post a summary comment on the merge request."""
+    if not GITLAB_TOKEN:
+        print("       Skipping MR note: no GitLab token available")
+        return False
+    url = (f"{GITLAB_API_URL}/projects/{quote_plus(project_id)}"
+           f"/merge_requests/{mr_iid}/notes")
+    headers = {"PRIVATE-TOKEN": GITLAB_TOKEN}
+    try:
+        resp = _session.post(url, headers=headers, json={"body": body}, timeout=30)
+        resp.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as exc:
+        print(f"       WARNING: Failed to post MR note: {exc}")
+        return False
+
+
+def post_inline_discussions(
+    project_id: str, mr_iid: str, findings: list[dict],
+    mr_changes: dict,
+) -> int:
+    """Post findings as inline diff discussions on the MR.
+
+    Each finding with a file_path and line_num is posted as a discussion
+    thread anchored to the new-file side of the diff.
+
+    Returns the number of discussions successfully created.
+    """
+    if not GITLAB_TOKEN:
+        print("       Skipping inline comments: no GitLab token available")
+        return 0
+
+    # Build set of valid (file, line) pairs from the diff to avoid posting
+    # on lines that don't exist in this MR.
+    valid_paths = set()
+    for change in mr_changes.get("changes", []):
+        new_path = change.get("new_path", "")
+        if new_path:
+            valid_paths.add(new_path)
+
+    url = (f"{GITLAB_API_URL}/projects/{quote_plus(project_id)}"
+           f"/merge_requests/{mr_iid}/discussions")
+    headers = {"PRIVATE-TOKEN": GITLAB_TOKEN}
+
+    head_sha = mr_changes.get("diff_refs", {}).get("head_sha", "")
+    base_sha = mr_changes.get("diff_refs", {}).get("base_sha", "")
+    start_sha = mr_changes.get("diff_refs", {}).get("start_sha", "")
+
+    posted = 0
+    for f in findings:
+        fp = f.get("file_path", "")
+        line = f.get("line_num")
+        if not fp or not line:
+            continue
+        # Normalize path (strip leading /)
+        fp = fp.lstrip("/")
+        if fp not in valid_paths:
+            continue
+
+        severity = f.get("severity", "MEDIUM").upper()
+        emoji = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵"}.get(
+            severity, "⚪")
+        cwe = f.get("cwe_id", "")
+        cwe_tag = f" ({cwe})" if cwe else ""
+        body = (f"{emoji} **[{severity}]{cwe_tag}** {f.get('description', 'Security finding')}\n\n"
+                f"_Category: {f.get('category', 'unknown')}_")
+
+        position = {
+            "position_type": "text",
+            "new_path": fp,
+            "new_line": int(line),
+            "old_path": fp,
+        }
+        if head_sha:
+            position["head_sha"] = head_sha
+        if base_sha:
+            position["base_sha"] = base_sha
+        if start_sha:
+            position["start_sha"] = start_sha
+
+        payload = {"body": body, "position": position}
+        try:
+            resp = _session.post(url, headers=headers, json=payload, timeout=15)
+            if resp.status_code in (200, 201):
+                posted += 1
+            # 400/422 usually means the line doesn't exist in the diff — skip
+        except requests.exceptions.RequestException:
+            pass
+
+    return posted
+
+
+def set_mr_labels(project_id: str, mr_iid: str, severity: str) -> bool:
+    """Add a security label to the merge request based on overall severity."""
+    if not GITLAB_TOKEN:
+        return False
+    label_map = {
+        "CRITICAL": "security::critical",
+        "HIGH": "security::high",
+        "MEDIUM": "security::medium",
+        "LOW": "security::low",
+        "NONE": "security::clean",
+    }
+    label = label_map.get(severity, "security::reviewed")
+    url = (f"{GITLAB_API_URL}/projects/{quote_plus(project_id)}"
+           f"/merge_requests/{mr_iid}")
+    headers = {"PRIVATE-TOKEN": GITLAB_TOKEN}
+    try:
+        # Get current labels
+        resp = _session.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        current_labels = resp.json().get("labels", [])
+        # Remove existing security labels, add new one
+        new_labels = [l for l in current_labels if not l.startswith("security::")]
+        new_labels.append(label)
+        resp = _session.put(url, headers=headers,
+                            json={"labels": ",".join(new_labels)}, timeout=15)
+        resp.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as exc:
+        print(f"       WARNING: Failed to set MR labels: {exc}")
+        return False
+
+
+def approve_or_reject_mr(
+    project_id: str, mr_iid: str, severity: str, cfg: dict,
+) -> str | None:
+    """Approve or leave unapproved based on severity vs approve_threshold.
+
+    Returns "approved", "unapproved", or None if approval is disabled.
+    """
+    if not cfg.get("approve", False):
+        return None
+    if not GITLAB_TOKEN:
+        print("       Skipping auto-approval: no GitLab token available")
+        return None
+
+    threshold = cfg.get("approve_threshold", "HIGH")
+    severity_order = ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    sev_idx = severity_order.index(severity) if severity in severity_order else 0
+    thr_idx = severity_order.index(threshold) if threshold in severity_order else 3
+
+    headers = {"PRIVATE-TOKEN": GITLAB_TOKEN}
+    base = (f"{GITLAB_API_URL}/projects/{quote_plus(project_id)}"
+            f"/merge_requests/{mr_iid}")
+
+    if sev_idx < thr_idx:
+        # Severity below threshold — approve
+        try:
+            resp = _session.post(f"{base}/approve", headers=headers, timeout=15)
+            if resp.status_code in (200, 201):
+                return "approved"
+        except requests.exceptions.RequestException as exc:
+            print(f"       WARNING: Failed to approve MR: {exc}")
+        return None
+    else:
+        # Severity meets/exceeds threshold — leave unapproved
+        return "unapproved"
+
+
+def create_issues_for_findings(
+    project_id: str, findings: list[dict], mr_iid: str,
+    max_issues: int = 5,
+) -> int:
+    """Create GitLab issues for critical and high severity findings.
+
+    Returns the number of issues created.
+    """
+    if not GITLAB_TOKEN:
+        return 0
+
+    high_findings = [f for f in findings
+                     if f.get("severity", "").upper() in ("CRITICAL", "HIGH")]
+    if not high_findings:
+        return 0
+
+    url = f"{GITLAB_API_URL}/projects/{quote_plus(project_id)}/issues"
+    headers = {"PRIVATE-TOKEN": GITLAB_TOKEN}
+    created = 0
+
+    for f in high_findings[:max_issues]:
+        severity = f.get("severity", "HIGH").upper()
+        cwe = f.get("cwe_id", "")
+        desc = f.get("description", "Security finding")
+        fp = f.get("file_path", "unknown")
+        line = f.get("line_num", "")
+
+        title = f"[DuoGuard] [{severity}] {desc[:80]}"
+        cwe_link = f"\n\n**CWE:** [{cwe}](https://cwe.mitre.org/data/definitions/{cwe.split('-')[-1]}.html)" if cwe else ""
+        body = (
+            f"## Security Finding from MR !{mr_iid}\n\n"
+            f"**Severity:** {severity}\n"
+            f"**File:** `{fp}`{f' (line {line})' if line else ''}\n"
+            f"**Category:** {f.get('category', 'unknown')}\n"
+            f"{cwe_link}\n\n"
+            f"### Description\n{desc}\n\n"
+            f"_Auto-created by DuoGuard security review._"
+        )
+        labels = f"security::{severity.lower()},DuoGuard"
+
+        try:
+            resp = _session.post(url, headers=headers, json={
+                "title": title, "description": body, "labels": labels,
+            }, timeout=15)
+            if resp.status_code in (200, 201):
+                created += 1
+        except requests.exceptions.RequestException:
+            pass
+
+    return created
+
+
 def _run_security_scan(project_id: str, mr_iid: str, output: str, sarif: str,
                         fail_on: str, config: dict | None = None) -> None:
     """Core security scan logic shared between CI/CD and agent modes."""
@@ -2100,7 +2315,7 @@ def _run_security_scan(project_id: str, mr_iid: str, output: str, sarif: str,
     print(f"  MR: !{mr_iid}")
 
     # Fetch MR data
-    print("\n[1/5] Fetching merge request data...")
+    print("\n[1/7] Fetching merge request data...")
     mr_info = get_mr_info(project_id, mr_iid)
     mr_changes = get_mr_diff(project_id, mr_iid)
     changes = mr_changes.get("changes", [])
@@ -2123,7 +2338,7 @@ def _run_security_scan(project_id: str, mr_iid: str, output: str, sarif: str,
     dep_diff_text = format_diff_for_analysis(dep_changes, max_size=max_diff)
 
     # Run enabled agents in parallel
-    print("\n[2/5] Running security agents in parallel...")
+    print("\n[2/7] Running security agents in parallel...")
     code_findings = ""
     dep_findings = ""
     secret_findings = ""
@@ -2166,14 +2381,14 @@ def _run_security_scan(project_id: str, mr_iid: str, output: str, sarif: str,
             + _parse_findings(secret_findings, "secret-scan")
         )
         if all_parsed:
-            print("\n[2.5/5] Generating fix suggestions...")
+            print("\n[2.5/7] Generating fix suggestions...")
             model = cfg.get("model", "claude-sonnet-4-5")
             fix_suggestions = generate_fix_suggestions(all_parsed, diff_text, model=model)
             print(f"         Generated suggestions for {len(all_parsed)} finding(s)")
 
     # Generate reports
     scan_duration = time.monotonic() - scan_start
-    print("\n[3/5] Generating reports...")
+    print("\n[3/7] Generating reports...")
     report = generate_report(mr_info, code_findings, dep_findings, secret_findings,
                              scan_duration=scan_duration, files_scanned=len(changes),
                              complexity=complexity, fix_suggestions=fix_suggestions)
@@ -2210,18 +2425,49 @@ def _run_security_scan(project_id: str, mr_iid: str, output: str, sarif: str,
         print(f"       Dependency Scanning report: {dep_scan_path}")
 
     # Export findings JSON for inline comments
-    print("\n[4/5] Exporting findings...")
+    print("\n[4/7] Exporting findings...")
     findings_path = "duoguard-findings.json"
     all_findings = export_findings_json(
         code_findings, dep_findings, secret_findings, findings_path)
     print(f"       {len(all_findings)} finding(s) exported to {findings_path}")
 
-    print("\n[5/5] Evaluating risk...")
+    print("\n[5/7] Evaluating risk...")
     severity = determine_severity(code_findings, dep_findings, secret_findings)
     print(f"       Overall Risk Level: {severity}")
 
     # Write severity to file for downstream jobs
     Path("duoguard-severity.txt").write_text(severity)
+
+    # Post results back to GitLab MR
+    print("\n[6/7] Posting results to GitLab MR...")
+
+    # Post summary comment
+    if post_mr_note(project_id, mr_iid, report):
+        print("       Summary comment posted")
+
+    # Post inline diff discussions
+    if cfg.get("inline_comments", True) and all_findings:
+        posted = post_inline_discussions(
+            project_id, mr_iid, all_findings, mr_changes)
+        print(f"       {posted} inline discussion(s) posted")
+
+    # Set security label
+    if set_mr_labels(project_id, mr_iid, severity):
+        print(f"       Label set: security::{severity.lower()}")
+
+    # Auto-approve/reject
+    approval = approve_or_reject_mr(project_id, mr_iid, severity, cfg)
+    if approval:
+        print(f"       MR {approval}")
+
+    # Create issues for critical/high findings
+    print("\n[7/7] Creating issues for critical findings...")
+    issues_created = create_issues_for_findings(
+        project_id, all_findings, mr_iid)
+    if issues_created:
+        print(f"       {issues_created} issue(s) created")
+    else:
+        print("       No critical/high findings requiring issues")
 
     severity_order = ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
     if severity_order.index(severity) >= severity_order.index(fail_on):
