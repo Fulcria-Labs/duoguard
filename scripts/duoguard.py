@@ -1284,6 +1284,200 @@ def generate_sbom(
     return sbom
 
 
+def generate_sast_report(
+    code_findings: str,
+    dep_findings: str = "",
+    secret_findings: str = "",
+    output_path: str | None = None,
+) -> dict:
+    """Generate a GitLab-native SAST report (gl-sast-report.json).
+
+    Produces a JSON report conforming to GitLab Security Report Schema v15.0.7,
+    compatible with the GitLab Security Dashboard and MR Security widget.
+
+    Args:
+        code_findings: raw markdown output from code security reviewer
+        dep_findings: raw markdown output from dependency auditor
+        secret_findings: raw markdown output from secret scanner
+        output_path: optional file path to write the JSON report
+
+    Returns:
+        The SAST report dict.
+    """
+    all_findings = (
+        _parse_findings(code_findings, "code-security")
+        + _parse_findings(dep_findings, "dependency-audit")
+        + _parse_findings(secret_findings, "secret-scan")
+    )
+
+    severity_map = {
+        "critical": "Critical",
+        "high": "High",
+        "medium": "Medium",
+        "low": "Low",
+        "info": "Info",
+    }
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    vulnerabilities = []
+    for f in all_findings:
+        vuln_id = str(uuid.uuid4())
+        sast_severity = severity_map.get(f["severity"], "Info")
+
+        # Build identifiers
+        identifiers = []
+        if f.get("cwe"):
+            cwe_num = f["cwe"].replace("CWE-", "")
+            identifiers.append({
+                "type": "cwe",
+                "name": f["cwe"],
+                "value": cwe_num,
+                "url": f"https://cwe.mitre.org/data/definitions/{cwe_num}.html",
+            })
+
+        # Build links
+        links = []
+        if f.get("owasp"):
+            links.append({
+                "name": f["owasp"],
+                "url": "https://owasp.org/Top10/",
+            })
+
+        vuln = {
+            "id": vuln_id,
+            "category": "sast",
+            "name": f["description"],
+            "message": f["description"],
+            "description": f"[{f['severity'].upper()}] {f['description']} (category: {f['category']})",
+            "severity": sast_severity,
+            "scanner": {
+                "id": "duoguard-sast",
+                "name": "DuoGuard SAST",
+            },
+            "identifiers": identifiers,
+            "location": {
+                "file": f["file_path"],
+                "start_line": f["line_num"],
+            },
+            "links": links,
+        }
+        vulnerabilities.append(vuln)
+
+    report = {
+        "version": "15.0.7",
+        "scan": {
+            "type": "sast",
+            "status": "success",
+            "start_time": now,
+            "end_time": now,
+            "scanner": {
+                "id": "duoguard-sast",
+                "name": "DuoGuard SAST",
+                "version": "1.0.0",
+                "vendor": {"name": "DuoGuard"},
+            },
+            "analyzer": {
+                "id": "duoguard-sast-analyzer",
+                "name": "DuoGuard SAST Analyzer",
+                "version": "1.0.0",
+                "vendor": {"name": "DuoGuard"},
+            },
+        },
+        "vulnerabilities": vulnerabilities,
+    }
+
+    if output_path:
+        with open(output_path, "w") as fh:
+            json.dump(report, fh, indent=2)
+
+    return report
+
+
+def generate_dependency_scanning_report(
+    sbom: dict,
+    dep_findings: str = "",
+    output_path: str | None = None,
+) -> dict:
+    """Generate a GitLab Dependency Scanning report with vulnerability entries.
+
+    Wraps ``sbom_to_gitlab_dependency_report`` and enriches it with actual
+    vulnerability entries parsed from the dependency audit findings.
+
+    Args:
+        sbom: CycloneDX SBOM dict (from ``generate_sbom``)
+        dep_findings: raw markdown output from the dependency auditor agent
+        output_path: optional file path to write the JSON report
+
+    Returns:
+        GitLab-compatible dependency scanning report dict.
+    """
+    base_report = sbom_to_gitlab_dependency_report(sbom)
+
+    # Parse dependency findings and add as vulnerabilities
+    findings = _parse_findings(dep_findings, "dependency-audit")
+
+    severity_map = {
+        "critical": "Critical",
+        "high": "High",
+        "medium": "Medium",
+        "low": "Low",
+        "info": "Info",
+    }
+
+    vulnerabilities = []
+    for f in findings:
+        vuln_id = str(uuid.uuid4())
+        sast_severity = severity_map.get(f["severity"], "Info")
+
+        identifiers = []
+        if f.get("cwe"):
+            cwe_num = f["cwe"].replace("CWE-", "")
+            identifiers.append({
+                "type": "cwe",
+                "name": f["cwe"],
+                "value": cwe_num,
+                "url": f"https://cwe.mitre.org/data/definitions/{cwe_num}.html",
+            })
+
+        links = []
+        if f.get("owasp"):
+            links.append({
+                "name": f["owasp"],
+                "url": "https://owasp.org/Top10/",
+            })
+
+        vuln = {
+            "id": vuln_id,
+            "category": "dependency_scanning",
+            "name": f["description"],
+            "message": f["description"],
+            "description": f"[{f['severity'].upper()}] {f['description']}",
+            "severity": sast_severity,
+            "scanner": {
+                "id": "duoguard-sbom",
+                "name": "DuoGuard SBOM Scanner",
+            },
+            "identifiers": identifiers,
+            "location": {
+                "file": f["file_path"],
+                "dependency": {
+                    "package": {"name": f.get("file_path", "unknown")},
+                },
+            },
+            "links": links,
+        }
+        vulnerabilities.append(vuln)
+
+    base_report["vulnerabilities"] = vulnerabilities
+
+    if output_path:
+        with open(output_path, "w") as fh:
+            json.dump(base_report, fh, indent=2)
+
+    return base_report
+
+
 def sbom_to_gitlab_dependency_report(sbom: dict) -> dict:
     """Convert a CycloneDX SBOM to GitLab Dependency Scanning report format.
 
@@ -1997,6 +2191,23 @@ def _run_security_scan(project_id: str, mr_iid: str, output: str, sarif: str,
                           dep_findings=dep_findings,
                           secret_findings=secret_findings)
     print(f"       SARIF report: {sarif_path}")
+
+    sast_path = "gl-sast-report.json"
+    generate_sast_report(code_findings,
+                         dep_findings=dep_findings,
+                         secret_findings=secret_findings,
+                         output_path=sast_path)
+    print(f"       SAST report: {sast_path}")
+
+    # Generate dependency scanning report if dependency changes exist
+    if dep_changes:
+        dep_scan_path = "gl-dependency-scanning-report.json"
+        sbom = generate_sbom(dep_changes,
+                             project_name=mr_info.get("title", "unknown"))
+        generate_dependency_scanning_report(sbom,
+                                            dep_findings=dep_findings,
+                                            output_path=dep_scan_path)
+        print(f"       Dependency Scanning report: {dep_scan_path}")
 
     # Export findings JSON for inline comments
     print("\n[4/5] Exporting findings...")

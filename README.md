@@ -25,6 +25,8 @@ Results are posted as:
 - **Inline diff discussions** anchored to the exact lines with findings
 - **MR security labels** (`security::critical`, `security::high`, `security::clean`, etc.)
 - **SARIF reports** for the GitLab Security Dashboard (with CWE/OWASP properties)
+- **GitLab SAST reports** (`gl-sast-report.json`) for native Security Dashboard integration
+- **Dependency Scanning reports** (`gl-dependency-scanning-report.json`) with vulnerability entries
 - **Code Quality JSON** for the Code Quality widget
 - **Automated MR approval/rejection** based on configurable severity thresholds
 - **GitLab issues** auto-created for critical/high findings with CWE links
@@ -253,7 +255,7 @@ duoguard/
 │   └── post_report.py                        # MR comments, inline discussions, approval
 ├── docs/
 │   └── external-agent-config.yml             # Config to paste in GitLab UI
-├── tests/                                    # 2265 tests (10 files)
+├── tests/                                    # 2467 tests (11 files)
 ├── .gitlab-ci.yml                            # CI/CD pipeline
 ├── .duoguard.yml                             # Project configuration (optional)
 ├── AGENTS.md                                 # Agent customization
@@ -266,7 +268,7 @@ duoguard/
 ## Testing
 
 ```bash
-# Run all 2265 tests (10 test files)
+# Run all 2467 tests (11 test files)
 python -m pytest tests/ -v
 
 # Tests cover: diff formatting, dependency extraction, severity scoring,
@@ -281,7 +283,7 @@ python -m pytest tests/ -v
 ## Prize Categories
 
 - **Anthropic + GitLab Grand Prize** — Deep Claude integration: semantic security analysis, multi-agent orchestration, AI Gateway managed credentials
-- **Most Technically Impressive** — Flow Registry v1 flow, parallel multi-agent execution, dual-mode (CI/CD + agent trigger), SARIF + Code Quality + inline discussions + MR labels + MR approval + discussion deduplication + CWE/OWASP enrichment + AI fix suggestions + diff complexity analysis + GitLab issue creation + scan metrics, 2265 tests
+- **Most Technically Impressive** — Flow Registry v1 flow, parallel multi-agent execution, dual-mode (CI/CD + agent trigger), SARIF + SAST + Dependency Scanning + Code Quality + inline discussions + MR labels + MR approval + discussion deduplication + CWE/OWASP enrichment + AI fix suggestions + diff complexity analysis + GitLab issue creation + scan metrics, 2467 tests
 - **Most Impactful** — Security automation that benefits every development team, zero-config with `injectGatewayToken`, configurable via `.duoguard.yml`, OWASP Top 10 coverage
 
 ## License
